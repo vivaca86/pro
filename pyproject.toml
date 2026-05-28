@@ -1,0 +1,13 @@
+[project]
+name = "game-data-engine"
+version = "0.1.0"
+description = "Raw game log processing and diagnosis engine prototype"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas>=2.0",
+  "openpyxl>=3.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

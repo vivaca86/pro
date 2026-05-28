@@ -1,0 +1,116 @@
+{
+  "timezone": "Asia/Seoul",
+  "session_gap_minutes": 30,
+  "fields": {
+    "uid": "uid",
+    "timestamp": "event_time",
+    "event": "event_name",
+    "content_id": "content_id",
+    "product_id": "product_id",
+    "amount": "amount",
+    "duration_sec": "duration_sec",
+    "wait_time_sec": "wait_time_sec",
+    "result": "result"
+  },
+  "event_labels": {
+    "login": {
+      "label": "접속",
+      "event_type": "session_start",
+      "group": null
+    },
+    "tutorial_step_05_drop": {
+      "label": "튜토리얼 5단계 이탈",
+      "event_type": "exit",
+      "group": "튜토리얼"
+    },
+    "tutorial_boss_fail": {
+      "label": "튜토리얼 보스 실패",
+      "event_type": "content_fail",
+      "group": "튜토리얼"
+    },
+    "tutorial_boss_clear": {
+      "label": "튜토리얼 보스 클리어",
+      "event_type": "content_success",
+      "group": "튜토리얼"
+    },
+    "arena_enter": {
+      "label": "아레나 입장",
+      "event_type": "content_enter",
+      "group": "아레나"
+    },
+    "arena_match_wait_timeout": {
+      "label": "아레나 매칭 시간 초과",
+      "event_type": "match_issue",
+      "group": "아레나"
+    },
+    "arena_win": {
+      "label": "아레나 승리",
+      "event_type": "content_success",
+      "group": "아레나"
+    },
+    "arena_lose": {
+      "label": "아레나 패배",
+      "event_type": "content_fail",
+      "group": "아레나"
+    },
+    "raid_enter": {
+      "label": "레이드 입장",
+      "event_type": "content_enter",
+      "group": "레이드"
+    },
+    "raid_clear_fail": {
+      "label": "레이드 클리어 실패",
+      "event_type": "content_fail",
+      "group": "레이드"
+    },
+    "raid_clear": {
+      "label": "레이드 클리어",
+      "event_type": "content_success",
+      "group": "레이드"
+    },
+    "reward_claim": {
+      "label": "보상 수령",
+      "event_type": "reward_claim",
+      "group": null
+    },
+    "shop_view": {
+      "label": "상점 노출",
+      "event_type": "product_view",
+      "group": "상점"
+    },
+    "pkg_starter_buy": {
+      "label": "초보자 패키지 구매",
+      "event_type": "purchase",
+      "group": "상품"
+    },
+    "pkg_raid_buy": {
+      "label": "레이드 성장 패키지 구매",
+      "event_type": "purchase",
+      "group": "상품"
+    }
+  },
+  "content_labels": {
+    "tutorial": {
+      "label": "튜토리얼",
+      "type": "onboarding"
+    },
+    "arena": {
+      "label": "아레나",
+      "type": "pvp"
+    },
+    "raid": {
+      "label": "레이드",
+      "type": "pve"
+    }
+  },
+  "product_labels": {
+    "starter_pack": {
+      "label": "초보자 패키지",
+      "category": "starter"
+    },
+    "raid_pack": {
+      "label": "레이드 성장 패키지",
+      "category": "raid"
+    }
+  }
+}
