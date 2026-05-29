@@ -1,5 +1,6 @@
 const API_BASE_STORAGE_KEY = "gameDataApiBase";
 const IS_GITHUB_PAGES = location.hostname.endsWith("github.io");
+const IS_LOCAL_DASHBOARD = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
 
 function normalizeApiBase(value) {
   return String(value || "").trim().replace(/\/+$/, "");
@@ -7,14 +8,19 @@ function normalizeApiBase(value) {
 
 function resolveApiBase() {
   const params = new URLSearchParams(location.search);
+  const urlApiBase = normalizeApiBase(params.get("api"));
+  if (urlApiBase) {
+    if (!IS_LOCAL_DASHBOARD) {
+      localStorage.setItem(API_BASE_STORAGE_KEY, urlApiBase);
+    }
+    return urlApiBase;
+  }
+  if (IS_LOCAL_DASHBOARD) {
+    return "";
+  }
   const configuredApiBase = normalizeApiBase(window.GAME_DATA_API_BASE);
   if (configuredApiBase) {
     return configuredApiBase;
-  }
-  const urlApiBase = normalizeApiBase(params.get("api"));
-  if (urlApiBase) {
-    localStorage.setItem(API_BASE_STORAGE_KEY, urlApiBase);
-    return urlApiBase;
   }
   return normalizeApiBase(localStorage.getItem(API_BASE_STORAGE_KEY));
 }
