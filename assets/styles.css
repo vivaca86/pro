@@ -257,6 +257,7 @@ select {
   cursor: pointer;
   font-size: 13px;
   font-weight: 800;
+  text-decoration: none;
   transition:
     transform 140ms ease,
     border-color 140ms ease,

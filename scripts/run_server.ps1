@@ -6,16 +6,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$ConfigPath = Join-Path $Root ".venv\pyvenv.cfg"
 $Python = "python"
 
-if (Test-Path $ConfigPath) {
-    $ExecutableLine = Get-Content $ConfigPath |
-        Where-Object { $_ -like "executable = *" } |
-        Select-Object -First 1
-    if ($ExecutableLine) {
-        $Python = $ExecutableLine.Substring("executable = ".Length)
-    }
+$VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
+if (Test-Path $VenvPython) {
+    $Python = $VenvPython
 }
 
 $SitePackages = Join-Path $Root ".venv\Lib\site-packages"

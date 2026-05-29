@@ -11,3 +11,4 @@ data/runs/
 data/warehouse/
 data/staging/
 staging/
+dist/
