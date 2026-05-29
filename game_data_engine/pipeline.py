@@ -7,6 +7,7 @@ import json
 
 import pandas as pd
 
+from .behavior import build_behavior_flow
 from .config import LanguageConfig
 from .diagnosis import build_alerts, diagnose_content, diagnose_data_quality, diagnose_revenue
 from .ingest import RawTable, describe_raw_table, ingest
@@ -78,6 +79,7 @@ def _artifact_payloads(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "journeys_sample.json": payload["journeys"],
         "sessions_sample.json": payload["sessions"],
+        "behavior_flow.json": payload["behavior_flow"],
         "content_health.json": payload["content_health"],
         "product_performance.json": payload["product_performance"],
         "purchase_contexts.json": payload["purchase_contexts"],
@@ -194,6 +196,7 @@ def _run_staged_pipeline(
         },
         "journeys": staged.journeys,
         "sessions": staged.sessions,
+        "behavior_flow": staged.behavior_flow,
         "failure_contexts": _records(staged.failures),
         "purchase_contexts": _jsonable(staged.purchases),
         "content_health": _records(staged.content),
@@ -317,6 +320,7 @@ def run_pipeline(
 
     _report_progress(progress_callback, 0.44, "journey", "세션과 유저 여정 구성 중")
     events, sessions, journeys, failures, purchases = build_sql_facts(events, config.session_gap_minutes)
+    behavior_flow = build_behavior_flow(events, sample_limit=sample_limit)
 
     _report_progress(progress_callback, 0.62, "metrics", "지표 계산 중")
     summary = daily_summary(events, sessions)
@@ -353,6 +357,7 @@ def run_pipeline(
             "session_count": int(len(sessions)),
             "sample": _records(sessions, sample_limit),
         },
+        "behavior_flow": behavior_flow,
         "failure_contexts": _records(failures),
         "purchase_contexts": _jsonable(purchases),
         "content_health": _records(content),

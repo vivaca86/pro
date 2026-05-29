@@ -29,13 +29,28 @@ const API_BASE = resolveApiBase();
 const DATA_URL = API_BASE ? `${API_BASE}/output/analysis.json` : "./output/analysis.json";
 const RUN_URL = API_BASE ? `${API_BASE}/api/run` : "./api/run";
 const RUNS_URL = API_BASE ? `${API_BASE}/api/runs` : "./api/runs";
+const LANGUAGE_URL = API_BASE ? `${API_BASE}/api/language` : "./api/language";
 
 let dashboardData = null;
+let languageConfig = null;
 let selectedIssueIndex = 0;
 let selectedFiles = [];
 let showDangerOnly = false;
 let issueSort = "impact";
 let activePoll = null;
+
+const EVENT_TYPE_OPTIONS = [
+  ["event", "일반"],
+  ["session_start", "접속/시작"],
+  ["content_enter", "콘텐츠 진입"],
+  ["content_success", "성공/완료"],
+  ["content_fail", "실패"],
+  ["match_issue", "매칭/대기 문제"],
+  ["product_view", "상품 조회"],
+  ["purchase", "결제"],
+  ["reward_claim", "보상"],
+  ["exit", "이탈"],
+];
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -62,6 +77,28 @@ function currency(value) {
 
 function percent(value) {
   return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function durationLabel(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds || 0)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours) return `${hours}시간 ${minutes}분`;
+  if (minutes) return `${minutes}분 ${secs}초`;
+  return `${secs}초`;
+}
+
+function behaviorCode(item) {
+  if (Array.isArray(item)) {
+    return {
+      code: item[0],
+      count: item[1],
+      label: item[0],
+      user_count: item[2],
+    };
+  }
+  return item || {};
 }
 
 function severityClass(severity) {
@@ -296,6 +333,507 @@ function renderProducts(data) {
       .join("") || `<span class="chip">구매 직전 행동 없음</span>`;
 }
 
+function pathSteps(item) {
+  if (!item) return [];
+  const rawSteps =
+    (Array.isArray(item.labels) && item.labels.length && item.labels) ||
+    (Array.isArray(item.path) && item.path.length && item.path) ||
+    String(item.path_text || item.code_path_text || "")
+      .split(/\s*->\s*/)
+      .filter(Boolean);
+  return rawSteps.map((step) => String(step).trim()).filter(Boolean);
+}
+
+function behaviorItemLabel(item) {
+  return item?.label || item?.code || item?.from || item?.to || "-";
+}
+
+function behaviorPathText(item) {
+  const steps = pathSteps(item);
+  return steps.length ? steps.join(" → ") : "-";
+}
+
+function renderBehaviorFlow(data) {
+  const behavior = data.behavior_flow || {};
+  const participation = (behavior.participation || behavior.top_codes || []).map(behaviorCode);
+  const transitions = (behavior.transition_rates || behavior.top_transitions || []).map(behaviorCode);
+  const commonPaths = behavior.common_paths || [];
+  const loopPatterns = behavior.loop_patterns || [];
+  const outliers = behavior.outliers || [];
+  const contentRows = behavior.content_participation || [];
+  const entryEvents = behavior.entry_events || [];
+  const exitEvents = behavior.exit_events || [];
+  const badge = $("#behaviorBadge");
+  const container = $("#behaviorFlow");
+  if (!container) return;
+
+  if (badge) {
+    badge.textContent = `${number(behavior.user_count)}명 / ${number(behavior.event_count)}건`;
+  }
+
+  if (!participation.length && !transitions.length && !commonPaths.length) {
+    container.innerHTML = `<p class="empty">행동 흐름 데이터가 없습니다.</p>`;
+    return;
+  }
+
+  const strongestPath = commonPaths[0];
+  const strongestPathSteps = pathSteps(strongestPath).slice(0, 7);
+  const strongestOutlier = outliers[0];
+  const dominantTransition = transitions[0];
+  const strongestLoop = loopPatterns[0];
+  const stopPoint = exitEvents[0];
+  const pathRate = Number(strongestPath?.user_rate || 0);
+  const transitionRate = Number(dominantTransition?.transition_rate || dominantTransition?.user_rate || 0);
+  const loopRate = Number(strongestLoop?.user_rate || 0);
+  const stopRate = Number(stopPoint?.user_rate || 0);
+  const pathSentence = strongestPath
+    ? `${number(strongestPath.user_count)}명 중 ${percent(pathRate)}가 같은 대표 루트를 공유합니다.`
+    : "아직 대표 루트가 뚜렷하게 잡히지 않았습니다.";
+  const transitionSentence = dominantTransition
+    ? `${dominantTransition.from || "-"} → ${dominantTransition.to || "-"} 전환은 ${percent(transitionRate)}입니다.`
+    : "전환 집중도를 계산할 수 있는 구간이 부족합니다.";
+  const loopSentence = strongestLoop
+    ? `${strongestLoop.from || "-"} 반복이 ${number(strongestLoop.count)}회 관찰되어 막힘 또는 재시도 후보입니다.`
+    : "반복 루프는 아직 두드러지지 않습니다.";
+
+  const journeySteps =
+    strongestPathSteps
+      .map(
+        (step, index) => `
+          <div class="flow-step">
+            <span>${String(index + 1).padStart(2, "0")}</span>
+            <strong>${escapeHtml(step)}</strong>
+          </div>
+        `,
+      )
+      .join(`<span class="flow-connector">→</span>`) || `<p class="empty">대표 경로 데이터가 없습니다.</p>`;
+
+  const insightCards = [
+    {
+      tone: pathRate >= 0.8 ? "strong" : "watch",
+      label: "대표 루트",
+      title: strongestPath ? behaviorPathText(strongestPath) : "공통 루트 부족",
+      finding: strongestPath
+        ? pathRate >= 0.8
+          ? "대부분의 유저가 같은 흐름을 지나갑니다. 이 루트가 현재 기준 행동선입니다."
+          : "대표 루트가 일부 유저에게만 강하게 나타납니다. 세그먼트별로 갈라볼 필요가 있습니다."
+        : "공통 경로가 충분히 반복되지 않았습니다.",
+      evidence: strongestPath
+        ? `${number(strongestPath.user_count)}명 · ${percent(pathRate)} · ${number(strongestPath.occurrence_count)}회`
+        : "근거 부족",
+    },
+    {
+      tone: transitionRate >= 0.8 ? "strong" : "watch",
+      label: "전환 집중",
+      title: dominantTransition ? `${dominantTransition.from || "-"} → ${dominantTransition.to || "-"}` : "전환 부족",
+      finding: dominantTransition
+        ? transitionRate >= 0.8
+          ? "앞 행동을 한 유저가 거의 같은 다음 행동으로 이동합니다. 흐름이 강하게 고정된 구간입니다."
+          : "다음 행동이 갈라지는 구간입니다. 여기서 선택지, 실패, 탐색 행동을 확인해야 합니다."
+        : "전환을 판단할 만큼 이어진 행동이 부족합니다.",
+      evidence: dominantTransition
+        ? `${number(dominantTransition.from_user_count || dominantTransition.user_count)}명 중 ${number(dominantTransition.user_count)}명 · ${percent(transitionRate)}`
+        : "근거 부족",
+    },
+    {
+      tone: strongestLoop ? "danger" : "calm",
+      label: "반복/막힘",
+      title: strongestLoop ? `${strongestLoop.from || "-"} 반복` : "뚜렷한 반복 없음",
+      finding: strongestLoop
+        ? "같은 지점으로 되돌아오는 행동이 보입니다. 실패, 대기, 보상 확인, 재도전 중 하나인지 로그 언어 매핑으로 확인해야 합니다."
+        : "반복 루프가 강하지 않아 막힘 신호는 낮습니다.",
+      evidence: strongestLoop ? `${number(strongestLoop.user_count)}명 · ${percent(loopRate)} · ${number(strongestLoop.count)}회` : "관찰 낮음",
+    },
+    {
+      tone: stopRate >= 0.7 ? "watch" : "calm",
+      label: "종료 지점",
+      title: stopPoint ? behaviorItemLabel(stopPoint) : "종료 분산",
+      finding: stopPoint
+        ? stopRate >= 0.7
+          ? "마지막 행동이 한 지점에 몰립니다. 정상 완료인지 이탈인지 확인해야 합니다."
+          : "종료 지점이 분산되어 있어 특정 막힘으로 단정하기 어렵습니다."
+        : "종료 행동 분포가 부족합니다.",
+      evidence: stopPoint ? `${number(stopPoint.user_count)}명 · ${percent(stopRate)}` : "근거 부족",
+    },
+  ];
+
+  const insightRows = insightCards
+    .map(
+      (item) => `
+        <article class="flow-insight-card ${item.tone}">
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${escapeHtml(item.title)}</strong>
+          <p>${escapeHtml(item.finding)}</p>
+          <em>${escapeHtml(item.evidence)}</em>
+        </article>
+      `,
+    )
+    .join("");
+
+  const transitionFocusRows =
+    transitions
+      .slice(0, 6)
+      .map((item) => {
+        const rate = Number(item.transition_rate || item.user_rate || 0);
+        return `
+          <div class="flow-transition-row">
+            <div>
+              <strong>${escapeHtml(item.from || "-")} → ${escapeHtml(item.to || "-")}</strong>
+              <span>${number(item.from_user_count || item.user_count)}명 중 ${number(item.user_count)}명 · ${number(item.count)}회</span>
+            </div>
+            <div class="flow-bar" aria-label="전환율 ${percent(rate)}">
+              <span style="width: ${Math.max(4, Math.min(100, rate * 100))}%"></span>
+            </div>
+            <em>${percent(rate)}</em>
+          </div>
+        `;
+      })
+      .join("") || `<p class="empty">전환 데이터가 없습니다.</p>`;
+
+  const commonPathRows = commonPaths
+    .slice(0, 8)
+    .map(
+      (item) => `
+        <article class="common-path-card">
+          <strong>${escapeHtml(behaviorPathText(item))}</strong>
+          <span>${number(item.user_count)}명 · ${percent(item.user_rate)} · ${number(item.occurrence_count)}회</span>
+        </article>
+      `,
+    )
+    .join("");
+
+  const outlierRows = outliers
+    .slice(0, 8)
+    .map(
+      (item) => `
+        <div class="outlier-row">
+          <strong>${escapeHtml(item.title || "-")}</strong>
+          <span>${escapeHtml(item.evidence || "")}</span>
+        </div>
+      `,
+    )
+    .join("");
+
+  const participationRows = participation
+    .slice(0, 12)
+    .map(
+      (item) => `
+        <article class="participation-card">
+          <div class="participation-card-head">
+            <div>
+              <strong>${escapeHtml(item.label || item.code || "-")}</strong>
+              <span>${escapeHtml(item.code || "-")}</span>
+            </div>
+            <em>${percent(item.user_rate)}</em>
+          </div>
+          <div class="behavior-stat-grid">
+            <div><span>참여 유저</span><strong>${number(item.user_count)}명</strong></div>
+            <div><span>이벤트</span><strong>${number(item.count)}건</strong></div>
+            <div><span>인당 평균</span><strong>${Number(item.events_per_user || 0).toFixed(1)}건</strong></div>
+          </div>
+          <div class="behavior-code-list">
+            <span>${escapeHtml(item.event_type || "event")}</span>
+            ${item.group ? `<span>${escapeHtml(item.group)}</span>` : ""}
+          </div>
+        </article>
+      `,
+    )
+    .join("");
+
+  const transitionRows = transitions
+    .slice(0, 8)
+    .map(
+      (item) => `
+        <div class="transition-row">
+          <strong>${escapeHtml(item.from || "-")} → ${escapeHtml(item.to || "-")}</strong>
+          <span>${number(item.from_user_count || item.user_count)}명 중 ${number(item.user_count)}명 · 전환율 ${percent(item.transition_rate || item.user_rate)} · ${number(item.count)}회</span>
+        </div>
+      `,
+    )
+    .join("");
+
+  const loopRows = loopPatterns
+    .slice(0, 6)
+    .map(
+      (item) => `
+        <div class="transition-row loop">
+          <strong>${escapeHtml(item.from || "-")} 반복</strong>
+          <span>${number(item.user_count)}명 · ${number(item.count)}회 · ${percent(item.user_rate)}</span>
+        </div>
+      `,
+    )
+    .join("");
+
+  const contentParticipation = contentRows
+    .slice(0, 8)
+    .map(
+      (item) => `
+        <div class="content-participation-row">
+          <div>
+            <strong>${escapeHtml(item.group || "-")}</strong>
+            <span>${number(item.code_count)}개 코드 · ${number(item.event_count)}건</span>
+          </div>
+          <em>${number(item.user_count)}명 · ${percent(item.user_rate)}</em>
+        </div>
+      `,
+    )
+    .join("");
+
+  const distributionRows = (items, title) => `
+    <div class="behavior-block">
+      <div class="behavior-block-title">
+        <span>${title}</span>
+        <strong>${number(items.length)}개</strong>
+      </div>
+      <div class="event-distribution">
+        ${
+          items
+            .slice(0, 6)
+            .map(
+              (item) => `
+                <div>
+                  <strong>${escapeHtml(item.label || item.code || "-")}</strong>
+                  <span>${number(item.user_count)}명 · ${percent(item.user_rate)}</span>
+                </div>
+              `,
+            )
+            .join("") || `<p class="empty">분포 데이터가 없습니다.</p>`
+        }
+      </div>
+    </div>
+  `;
+
+  container.innerHTML = `
+    <section class="flow-analysis-card">
+      <div class="flow-analysis-copy">
+        <span>흐름 해석</span>
+        <h3>${escapeHtml(pathSentence)}</h3>
+        <p>${escapeHtml(`${transitionSentence} ${loopSentence}`)}</p>
+      </div>
+      <div class="flow-analysis-metrics">
+        <div><span>분석 유저</span><strong>${number(behavior.user_count)}명</strong></div>
+        <div><span>행동 로그</span><strong>${number(behavior.event_count)}건</strong></div>
+        <div><span>대표 루트</span><strong>${percent(pathRate)}</strong></div>
+      </div>
+    </section>
+
+    <section class="journey-map">
+      <div class="journey-header">
+        <div>
+          <span>대표 여정</span>
+          <strong>${strongestPath ? `${number(strongestPath.user_count)}명 공유 · ${number(strongestPath.occurrence_count)}회 반복` : "대표 여정 없음"}</strong>
+        </div>
+        <em>${strongestPath ? percent(pathRate) : "-"}</em>
+      </div>
+      <div class="journey-rail">${journeySteps}</div>
+    </section>
+
+    <section class="flow-insight-grid">${insightRows}</section>
+
+    <section class="flow-transition-board">
+      <div class="behavior-block-title">
+        <span>갈림과 집중</span>
+        <strong>상위 ${number(Math.min(transitions.length, 6))}개 전환</strong>
+      </div>
+      ${transitionFocusRows}
+    </section>
+
+    <details class="behavior-detail">
+      <summary>
+        <span>근거 데이터 펼치기</span>
+        <strong>공통 ${number(commonPaths.length)} · 튀는 부분 ${number(outliers.length)} · 이벤트 ${number(participation.length)} · 루프 ${number(loopPatterns.length)}</strong>
+      </summary>
+      <div class="behavior-columns">
+        <div class="behavior-block">
+          <div class="behavior-block-title">
+            <span>공통 행동 패턴</span>
+            <strong>상위 ${number(Math.min(commonPaths.length, 8))}개</strong>
+          </div>
+          <div class="common-path-list">${commonPathRows || `<p class="empty">공통 경로 데이터가 없습니다.</p>`}</div>
+        </div>
+        <div class="behavior-block">
+          <div class="behavior-block-title">
+            <span>튀는 부분</span>
+            <strong>상위 ${number(Math.min(outliers.length, 8))}개</strong>
+          </div>
+          <div class="outlier-list">${outlierRows || `<p class="empty">뚜렷한 이상 패턴은 아직 없습니다.</p>`}</div>
+        </div>
+      </div>
+      <div class="behavior-block">
+        <div class="behavior-block-title">
+          <span>이벤트 참여</span>
+          <strong>상위 ${number(Math.min(participation.length, 12))}개</strong>
+        </div>
+        <div class="participation-grid">${participationRows}</div>
+      </div>
+      <div class="behavior-columns">
+        <div class="behavior-block">
+          <div class="behavior-block-title">
+            <span>콘텐츠/그룹 참여</span>
+            <strong>상위 ${number(Math.min(contentRows.length, 8))}개</strong>
+          </div>
+          <div class="content-participation-list">
+            ${contentParticipation || `<p class="empty">아직 그룹 매핑이 없어 코드 단위로만 표시됩니다.</p>`}
+          </div>
+        </div>
+        <div class="behavior-block">
+          <div class="behavior-block-title">
+            <span>전환율</span>
+            <strong>상위 ${number(Math.min(transitions.length, 8))}개</strong>
+          </div>
+          <div class="transition-list">${transitionRows || `<p class="empty">전환 데이터가 없습니다.</p>`}</div>
+        </div>
+      </div>
+      <div class="behavior-block">
+        <div class="behavior-block-title">
+          <span>반복 루프</span>
+          <strong>상위 ${number(Math.min(loopPatterns.length, 6))}개</strong>
+        </div>
+        <div class="transition-list compact">${loopRows || `<p class="empty">반복 루프가 두드러지지 않습니다.</p>`}</div>
+      </div>
+      <div class="behavior-columns compact">
+        ${distributionRows(entryEvents, "첫 행동 분포")}
+        ${distributionRows(exitEvents, "마지막 행동 분포")}
+      </div>
+    </details>
+
+    <p class="behavior-note">${escapeHtml(behavior.note || "코드 의미는 확정하지 않고 순서와 빈도만 보여줍니다.")}</p>
+  `;
+}
+
+function eventTypeOptions(selectedValue) {
+  return EVENT_TYPE_OPTIONS.map(
+    ([value, label]) =>
+      `<option value="${escapeHtml(value)}" ${value === selectedValue ? "selected" : ""}>${escapeHtml(label)}</option>`,
+  ).join("");
+}
+
+function mappingValue(raw, field, fallback = "") {
+  const configured = languageConfig?.event_labels?.[raw];
+  if (configured && configured[field] !== undefined && configured[field] !== null) {
+    return configured[field];
+  }
+  return fallback ?? "";
+}
+
+function renderLanguageSettings(data) {
+  const suggestions = data.language?.suggestions || [];
+  const configured = languageConfig?.event_labels || {};
+  const rows = suggestions
+    .map((item) => ({
+      ...item,
+      configured: Boolean(configured[item.raw]),
+    }))
+    .sort(
+      (a, b) =>
+        Number(b.needs_confirmation || b.configured) - Number(a.needs_confirmation || a.configured) ||
+        Number(b.count || 0) - Number(a.count || 0),
+    )
+    .slice(0, 40);
+
+  const container = $("#languageMappings");
+  const saveButton = $("#saveLanguageButton");
+  const status = $("#languageSaveStatus");
+  if (!container || !saveButton || !status) return;
+
+  if (!rows.length) {
+    container.innerHTML = `<p class="empty">설정할 로그 코드가 없습니다.</p>`;
+    saveButton.disabled = true;
+    status.textContent = "";
+    return;
+  }
+
+  container.innerHTML = rows
+    .map((item) => {
+      const raw = String(item.raw || "");
+      const label = mappingValue(raw, "label", item.suggested_label || raw);
+      const eventType = mappingValue(raw, "event_type", item.event_type || "event");
+      const group = mappingValue(raw, "group", item.group || "");
+      return `
+        <article class="mapping-row" data-log-code="${escapeHtml(raw)}">
+          <div class="mapping-code">
+            <strong>${escapeHtml(raw)}</strong>
+            <span>${number(item.count)}건 · ${item.configured ? "설정됨" : item.needs_confirmation ? "확인 필요" : "관찰됨"}</span>
+          </div>
+          <label>
+            <span>이름</span>
+            <input data-map-field="label" value="${escapeHtml(label)}" placeholder="예: 접속 시작" />
+          </label>
+          <label>
+            <span>유형</span>
+            <select data-map-field="event_type">${eventTypeOptions(eventType)}</select>
+          </label>
+          <label>
+            <span>그룹</span>
+            <input data-map-field="group" value="${escapeHtml(group || "")}" placeholder="예: 튜토리얼, 상점" />
+          </label>
+        </article>
+      `;
+    })
+    .join("");
+
+  saveButton.disabled = IS_GITHUB_PAGES && !API_BASE;
+  status.textContent = saveButton.disabled ? "중앙 API 연결 후 저장할 수 있습니다." : "저장하면 다음 분석부터 적용됩니다.";
+  saveButton.onclick = saveLanguageMappings;
+}
+
+function collectLanguageMappings() {
+  return [...document.querySelectorAll(".mapping-row")]
+    .map((row) => {
+      const valueOf = (field) => row.querySelector(`[data-map-field="${field}"]`)?.value?.trim() || "";
+      return {
+        raw: row.dataset.logCode || "",
+        label: valueOf("label"),
+        event_type: valueOf("event_type") || "event",
+        group: valueOf("group"),
+      };
+    })
+    .filter((item) => item.raw && item.label);
+}
+
+async function loadLanguageConfig() {
+  if (IS_GITHUB_PAGES && !API_BASE) {
+    languageConfig = null;
+    return;
+  }
+  try {
+    const response = await fetch(`${LANGUAGE_URL}?v=${Date.now()}`);
+    languageConfig = response.ok ? await response.json() : null;
+  } catch {
+    languageConfig = null;
+  }
+}
+
+async function saveLanguageMappings() {
+  const button = $("#saveLanguageButton");
+  const status = $("#languageSaveStatus");
+  const mappings = collectLanguageMappings();
+  if (!mappings.length) {
+    status.textContent = "저장할 매핑이 없습니다.";
+    return;
+  }
+  button.disabled = true;
+  status.textContent = "저장 중";
+  try {
+    const response = await fetch(LANGUAGE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mappings }),
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.error) {
+      throw new Error(payload.error || `저장 실패: HTTP ${response.status}`);
+    }
+    languageConfig = payload;
+    renderLanguageSettings(dashboardData || {});
+    status.textContent = `${number(payload.updated)}개 저장됨. 같은 파일을 다시 분석하면 반영됩니다.`;
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = IS_GITHUB_PAGES && !API_BASE;
+  }
+}
+
 function qualityRow(label, value) {
   return `
     <div class="quality-row">
@@ -328,6 +866,7 @@ function renderDataQuality(data) {
     qualityRow("확인 필요", `${number(need)}개`),
     qualityRow("AI 추론 행", `${number(quality.inferred_language_rows)}건`),
   ].join("");
+  renderLanguageSettings(data);
 }
 
 function render(data) {
@@ -338,6 +877,7 @@ function render(data) {
   renderBoard(data);
   renderDrawer(data);
   renderAiBriefing(data);
+  renderBehaviorFlow(data);
   renderContentMap(data);
   renderProducts(data);
   renderDataQuality(data);
@@ -523,6 +1063,7 @@ async function loadDashboard() {
       if (!response.ok) throw new Error(`analysis.json을 읽을 수 없습니다. HTTP ${response.status}`);
       data = await response.json();
     }
+    await loadLanguageConfig();
     const firstDangerIndex = visibleIssues(data).findIndex((issue) => issue.severity === "위험");
     selectedIssueIndex = firstDangerIndex >= 0 ? firstDangerIndex : 0;
     render(data);

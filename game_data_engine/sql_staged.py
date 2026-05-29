@@ -7,6 +7,7 @@ from typing import Any
 import duckdb
 import pandas as pd
 
+from .behavior import build_behavior_flow_from_duckdb
 from .config import LanguageConfig
 from .ingest import RawTableInfo, discover_files
 from .language import infer_fields
@@ -42,6 +43,7 @@ class StagedAnalysis:
     language_suggestions: list[dict[str, Any]]
     sessions: dict[str, Any]
     journeys: dict[str, Any]
+    behavior_flow: dict[str, Any]
     failures: pd.DataFrame
     purchases: dict[str, Any]
     content: pd.DataFrame
@@ -1171,6 +1173,7 @@ def build_staged_analysis(
         language_suggestions = _language_suggestions(con)
         sessions = _sample_sessions(con, sample_limit)
         journeys = _sample_journeys(con, sample_limit)
+        behavior_flow = build_behavior_flow_from_duckdb(con, sample_limit=sample_limit)
         segments = _segments(con)
         concentration = _concentration(con)
     finally:
@@ -1186,6 +1189,7 @@ def build_staged_analysis(
         language_suggestions=language_suggestions,
         sessions=sessions,
         journeys=journeys,
+        behavior_flow=behavior_flow,
         failures=failures,
         purchases=purchases,
         content=content,

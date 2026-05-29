@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Game Data Decision Board</title>
-    <link rel="stylesheet" href="./assets/styles.css?v=board-20260529-2" />
+    <link rel="stylesheet" href="./assets/styles.css?v=board-20260529-9" />
   </head>
   <body>
     <div class="app-shell board-shell">
@@ -20,6 +20,7 @@
         <nav class="nav-list">
           <a class="nav-item" href="#input"><span>데이터 입력</span></a>
           <a class="nav-item active" href="#board" aria-current="page"><span>이슈 보드</span></a>
+          <a class="nav-item" href="#behavior"><span>행동 흐름</span></a>
           <a class="nav-item" href="#brief"><span>AI 브리핑</span></a>
           <a class="nav-item" href="#content"><span>콘텐츠 건강도</span></a>
           <a class="nav-item" href="#revenue"><span>매출 진단</span></a>
@@ -112,6 +113,19 @@
           </aside>
         </section>
 
+        <section class="behavior-section" id="behavior">
+          <article class="panel behavior-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Behavior</p>
+                <h2>행동 흐름</h2>
+              </div>
+              <span class="badge neutral" id="behaviorBadge">-</span>
+            </div>
+            <div id="behaviorFlow" class="behavior-flow"></div>
+          </article>
+        </section>
+
         <section class="support-grid">
           <article class="panel" id="brief">
             <div class="panel-header">
@@ -168,12 +182,17 @@
               </div>
             </div>
             <div id="languageStatus" class="quality-list"></div>
+            <div id="languageMappings" class="language-mappings"></div>
+            <div class="language-actions">
+              <button class="button primary" id="saveLanguageButton" type="button" disabled>매핑 저장</button>
+              <span id="languageSaveStatus">분석 결과를 불러오는 중입니다.</span>
+            </div>
           </article>
         </section>
       </main>
     </div>
 
-    <script src="./assets/api-config.js?v=board-20260529-3"></script>
-    <script src="./assets/dashboard.js?v=board-20260529-3"></script>
+    <script src="./assets/api-config.js?v=board-20260529-9"></script>
+    <script src="./assets/dashboard.js?v=board-20260529-9"></script>
   </body>
 </html>

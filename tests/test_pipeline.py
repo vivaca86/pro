@@ -51,6 +51,13 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(payload["summary"]["paying_users"], 3)
             self.assertEqual(payload["summary_by_date"]["date_count"], 1)
             self.assertEqual(payload["journeys"]["user_count"], 10)
+            self.assertEqual(payload["behavior_flow"]["event_count"], 45)
+            self.assertTrue(payload["behavior_flow"]["users"])
+            self.assertTrue(payload["behavior_flow"]["top_transitions"])
+            self.assertTrue(payload["behavior_flow"]["participation"])
+            self.assertTrue(payload["behavior_flow"]["entry_events"])
+            self.assertTrue(payload["behavior_flow"]["common_paths"])
+            self.assertIn("transition_rate", payload["behavior_flow"]["transition_rates"][0])
             self.assertEqual(payload["data_quality"]["field_reports"][0]["normalize_engine"], "duckdb")
             self.assertEqual(payload["data_quality"]["field_reports"][0]["execution_engine"], "duckdb_staged")
 
@@ -328,6 +335,16 @@ class PipelineTest(unittest.TestCase):
             raw_events = {item["raw"] for item in payload["language"]["suggestions"]}
             self.assertIn("510101", raw_events)
             self.assertIn("570202", raw_events)
+            behavior = payload["behavior_flow"]
+            self.assertEqual(behavior["user_count"], 1)
+            self.assertEqual(behavior["event_count"], 2)
+            self.assertIn("510101 -> 570202", behavior["users"][0]["sequence_text"])
+            self.assertEqual([item["code"] for item in behavior["users"][0]["sequence"]], ["510101", "570202"])
+            self.assertEqual([item["code"] for item in behavior["entry_events"]], ["510101"])
+            self.assertEqual([item["code"] for item in behavior["exit_events"]], ["570202"])
+            self.assertEqual(behavior["participation"][0]["user_rate"], 1.0)
+            self.assertEqual(behavior["common_paths"][0]["code_path_text"], "510101 -> 570202")
+            self.assertEqual(behavior["transition_rates"][0]["transition_rate"], 1.0)
             issue_types = {
                 issue["type"]
                 for issues in payload["diagnosis"].values()

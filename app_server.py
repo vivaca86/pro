@@ -52,13 +52,26 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 RUNS_DIR = DATA_DIR / "runs"
 OUTPUT_DIR, OUTPUT_DIR_SOURCE = resolve_output_dir(DATA_DIR)
 WAREHOUSE_DB = DATA_DIR / "warehouse" / "game.duckdb"
-DICTIONARY = ROOT / "examples" / "log_language.json"
+DEFAULT_DICTIONARY = ROOT / "examples" / "log_language.json"
+DICTIONARY = Path(os.environ.get("APP_DICTIONARY_PATH", DATA_DIR / "config" / "log_language.json")).resolve()
 LATEST_RUN = OUTPUT_DIR / "latest_run.json"
 JOB_QUEUE: Queue[tuple[str, list[Path], dict[str, str]]] = Queue()
 WORKER_LOCK = Lock()
 JSON_LOCK = Lock()
 WORKER_STARTED = False
 DEFAULT_ALLOWED_ORIGINS = {"https://vivaca86.github.io"}
+ALLOWED_EVENT_TYPES = {
+    "event",
+    "session_start",
+    "content_enter",
+    "content_success",
+    "content_fail",
+    "match_issue",
+    "product_view",
+    "purchase",
+    "reward_claim",
+    "exit",
+}
 
 
 def allowed_origins() -> set[str]:
@@ -162,6 +175,7 @@ def storage_health(env: Mapping[str, str] = os.environ) -> dict[str, object]:
         "output_dir": display_path(OUTPUT_DIR),
         "output_dir_source": OUTPUT_DIR_SOURCE,
         "warehouse_db": display_path(WAREHOUSE_DB),
+        "dictionary": display_path(DICTIONARY),
         "railway_runtime": railway_runtime,
         "railway_volume_mounted": railway_volume_mounted,
         "persistence": persistence,
@@ -179,8 +193,82 @@ def build_storage(run_id: str) -> dict[str, str]:
         "analysis_json": display_path(processed_dir / "analysis.json"),
         "normalized_events": display_path(processed_dir / "normalized_events.csv"),
         "warehouse_db": display_path(WAREHOUSE_DB),
+        "dictionary": display_path(DICTIONARY),
         "latest_analysis_json": display_path(OUTPUT_DIR / "analysis.json"),
         "latest_normalized_events": display_path(OUTPUT_DIR / "normalized_events.csv"),
+    }
+
+
+def ensure_dictionary() -> Path:
+    if DICTIONARY.exists():
+        return DICTIONARY
+    DICTIONARY.parent.mkdir(parents=True, exist_ok=True)
+    if DEFAULT_DICTIONARY.exists():
+        shutil.copyfile(DEFAULT_DICTIONARY, DICTIONARY)
+    else:
+        write_json(
+            DICTIONARY,
+            {
+                "timezone": "Asia/Seoul",
+                "session_gap_minutes": 30,
+                "fields": {},
+                "event_labels": {},
+                "content_labels": {},
+                "product_labels": {},
+            },
+        )
+    return DICTIONARY
+
+
+def clean_mapping_text(value: object, max_length: int) -> str:
+    text = str(value or "").strip()
+    return text[:max_length]
+
+
+def normalize_language_mapping(mapping: Mapping[str, object]) -> tuple[str, dict[str, object]] | None:
+    raw = clean_mapping_text(mapping.get("raw") or mapping.get("code"), 160)
+    if not raw:
+        return None
+    label = clean_mapping_text(mapping.get("label") or mapping.get("suggested_label") or raw, 160) or raw
+    event_type = clean_mapping_text(mapping.get("event_type") or "event", 60)
+    if event_type not in ALLOWED_EVENT_TYPES:
+        event_type = "event"
+    group = clean_mapping_text(mapping.get("group"), 120)
+    return raw, {
+        "label": label,
+        "event_type": event_type,
+        "group": group or None,
+        "confidence": 1.0,
+    }
+
+
+def update_language_dictionary(
+    mappings: list[Mapping[str, object]],
+    dictionary_path: Path | None = None,
+) -> dict[str, object]:
+    target = dictionary_path or ensure_dictionary()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with JSON_LOCK:
+        data = read_json(target) if target.exists() else {}
+        data.setdefault("timezone", "Asia/Seoul")
+        data.setdefault("session_gap_minutes", 30)
+        data.setdefault("fields", {})
+        event_labels = data.setdefault("event_labels", {})
+        changed: list[str] = []
+        for mapping in mappings:
+            normalized = normalize_language_mapping(mapping)
+            if not normalized:
+                continue
+            raw, entry = normalized
+            event_labels[raw] = entry
+            changed.append(raw)
+        write_json(target, data)
+    return {
+        "status": "ok",
+        "updated": len(changed),
+        "codes": changed,
+        "dictionary": display_path(target),
+        "event_labels": data.get("event_labels", {}),
     }
 
 
@@ -245,9 +333,10 @@ def run_analysis_job(run_id: str, saved: list[Path], storage: dict[str, str]) ->
             progress=0.06,
             message="분석 준비 중",
         )
+        dictionary_path = ensure_dictionary()
         result = run_pipeline(
             inputs=saved,
-            dictionary_path=DICTIONARY if DICTIONARY.exists() else None,
+            dictionary_path=dictionary_path,
             normalized_out=processed_normalized,
             artifacts_dir=processed_dir,
             warehouse_path=WAREHOUSE_DB,
@@ -329,12 +418,16 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path != "/api/run":
-            self.send_error(404, "Not found")
-            return
         try:
-            payload = self._handle_run()
-            self._send_json(payload, status=202)
+            if parsed.path == "/api/run":
+                payload = self._handle_run()
+                self._send_json(payload, status=202)
+                return
+            if parsed.path == "/api/language":
+                payload = self._handle_language_save()
+                self._send_json(payload)
+                return
+            self.send_error(404, "Not found")
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
 
@@ -351,6 +444,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "storage": storage,
                 }
             )
+            return
+        if parsed.path == "/api/language":
+            path = ensure_dictionary()
+            payload = read_json(path)
+            payload["dictionary"] = display_path(path)
+            payload["event_type_options"] = sorted(ALLOWED_EVENT_TYPES)
+            self._send_json(payload)
             return
         if parsed.path == "/api/runs/latest":
             if not LATEST_RUN.exists():
@@ -383,6 +483,15 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
         super().do_GET()
 
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get("content-length", "0") or 0)
+        if length <= 0:
+            return {}
+        if length > 1_000_000:
+            raise ValueError("JSON body is too large.")
+        raw = self.rfile.read(length)
+        return json.loads(raw.decode("utf-8"))
+
     def _send_json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -390,6 +499,15 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_language_save(self) -> dict:
+        payload = self._read_json_body()
+        mappings = payload.get("mappings")
+        if isinstance(mappings, dict):
+            mappings = [{"raw": raw, **entry} for raw, entry in mappings.items() if isinstance(entry, dict)]
+        if not isinstance(mappings, list):
+            raise ValueError("mappings must be a list.")
+        return update_language_dictionary([item for item in mappings if isinstance(item, dict)])
 
     def _read_part_until_boundary(self, boundary: bytes, handle: object | None = None) -> bytes:
         previous: bytes | None = None

@@ -42,6 +42,39 @@ class AppServerStorageTest(unittest.TestCase):
             self.assertEqual(output_dir, data_dir / "output")
             self.assertEqual(source, "data_dir")
 
+    def test_language_dictionary_update_merges_event_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dictionary = Path(directory) / "log_language.json"
+            app_server.write_json(
+                dictionary,
+                {
+                    "timezone": "Asia/Seoul",
+                    "session_gap_minutes": 30,
+                    "fields": {},
+                    "event_labels": {},
+                    "content_labels": {},
+                    "product_labels": {},
+                },
+            )
+
+            result = app_server.update_language_dictionary(
+                [
+                    {
+                        "raw": "510101",
+                        "label": "접속 시작",
+                        "event_type": "session_start",
+                        "group": "",
+                    }
+                ],
+                dictionary,
+            )
+
+            saved = app_server.read_json(dictionary)
+            self.assertEqual(result["updated"], 1)
+            self.assertEqual(saved["event_labels"]["510101"]["label"], "접속 시작")
+            self.assertEqual(saved["event_labels"]["510101"]["event_type"], "session_start")
+            self.assertIsNone(saved["event_labels"]["510101"]["group"])
+
 
 if __name__ == "__main__":
     unittest.main()
