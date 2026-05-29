@@ -83,6 +83,15 @@ def normalize_frame(frame: pd.DataFrame, config: LanguageConfig) -> tuple[pd.Dat
     )
     normalized["content_label"] = content_labels[0]
     normalized["content_type"] = content_labels[1]
+    inferred_with_content_label = (
+        (normalized["language_source"] != "dictionary")
+        & normalized["content_label"].notna()
+        & (normalized["content_label"].astype(str) != "")
+    )
+    normalized.loc[inferred_with_content_label, "group"] = normalized.loc[
+        inferred_with_content_label,
+        "content_label",
+    ]
 
     product_labels = normalized["product_id"].map(lambda value: label_product(value, config))
     normalized["product_label"] = product_labels.map(lambda value: value[0])

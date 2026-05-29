@@ -217,7 +217,12 @@ def _normalize_file(path: Path, config: LanguageConfig) -> tuple[RawTableInfo, p
                 classified.event_raw,
                 classified.event_label,
                 classified.event_type,
-                classified."group",
+                CASE
+                    WHEN classified.language_source != 'dictionary'
+                     AND content_labels_in.configured_content_label IS NOT NULL
+                    THEN content_labels_in.configured_content_label
+                    ELSE classified."group"
+                END AS "group",
                 classified.content_id,
                 CASE
                     WHEN classified.content_id IS NULL THEN classified."group"

@@ -213,6 +213,39 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(payload["data_quality"]["missing_uid_rows"], 1)
             self.assertLess(payload["data_quality"]["quality_score"], 1)
 
+    def test_inferred_content_group_uses_configured_label(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unknown_event.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "uid,event_time,event_name,content_id,product_id,amount,duration_sec,wait_time_sec,result",
+                        "u1,2026-05-28 00:00:00,login,,,0,0,0,success",
+                        "u1,2026-05-28 00:01:00,mystery_client_signal,arena,,0,0,45,timeout",
+                        "u1,2026-05-28 00:02:00,arena_match_wait_timeout,arena,,0,0,50,timeout",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = LanguageConfig.load(Path("examples/log_language.json"))
+            arena_label = config.content_labels["arena"]["label"]
+
+            payload = run_pipeline(
+                inputs=[path],
+                dictionary_path=Path("examples/log_language.json"),
+                sample_limit=1,
+            )
+
+            content_groups = {row["group"] for row in payload["content_health"]}
+            self.assertIn(arena_label, content_groups)
+            self.assertNotIn("arena", content_groups)
+            inferred = [
+                item
+                for item in payload["language"]["suggestions"]
+                if item["raw"] == "mystery_client_signal"
+            ]
+            self.assertEqual(inferred[0]["group"], arena_label)
+
     def test_staged_pipeline_matches_pandas_quality_and_daily_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "parity.csv"
