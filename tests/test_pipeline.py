@@ -246,6 +246,41 @@ class PipelineTest(unittest.TestCase):
             ]
             self.assertEqual(inferred[0]["group"], arena_label)
 
+    def test_missing_event_column_uses_row_shape_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "shape_only.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "acct,log_at,content,sku,krw,queue_seconds,state",
+                        "u1,2026-05-28 00:00:00,arena,,0,55,timeout",
+                        "u1,2026-05-28 00:03:00,arena,,0,0,fail",
+                        "u2,2026-05-28 00:04:00,raid,,0,0,fail",
+                        "u3,2026-05-28 00:05:00,,starter_pack,9900,0,success",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = LanguageConfig.load(Path("examples/log_language.json"))
+
+            payload = run_pipeline(
+                inputs=[path],
+                dictionary_path=Path("examples/log_language.json"),
+                sample_limit=2,
+            )
+
+            self.assertEqual(payload["summary"]["active_users"], 3)
+            self.assertEqual(payload["summary"]["paying_users"], 1)
+            self.assertEqual(payload["summary"]["revenue"], 9900)
+            event_types = {item["event_type"] for item in payload["language"]["suggestions"]}
+            self.assertIn("match_issue", event_types)
+            self.assertIn("content_fail", event_types)
+            self.assertIn("purchase", event_types)
+            content_groups = {row["group"] for row in payload["content_health"]}
+            self.assertIn(config.content_labels["arena"]["label"], content_groups)
+            self.assertIn(config.content_labels["raid"]["label"], content_groups)
+            self.assertEqual(payload["data_quality"]["field_reports"][0]["fields"]["event"], None)
+
     def test_staged_pipeline_matches_pandas_quality_and_daily_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "parity.csv"

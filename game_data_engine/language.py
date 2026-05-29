@@ -9,16 +9,161 @@ from .config import FieldMapping, LanguageConfig
 
 
 FIELD_ALIASES = {
-    "uid": ["uid", "user_id", "userid", "player_id", "account_id", "member_id"],
-    "timestamp": ["event_time", "timestamp", "time", "created_at", "log_dt", "dt", "date"],
-    "event": ["event_name", "event", "action", "action_type", "log_name", "event_type"],
-    "content_id": ["content_id", "stage_id", "stage_no", "dungeon_id", "raid_id", "level_id", "chapter_id"],
-    "product_id": ["product_id", "package_id", "sku", "shop_item", "item_id", "goods_id"],
-    "amount": ["amount", "price", "paid_amount", "revenue", "purchase_value", "cash_amount"],
-    "duration_sec": ["duration_sec", "duration", "play_time", "stay_time", "elapsed_sec"],
-    "wait_time_sec": ["wait_time", "wait_time_sec", "matching_wait", "queue_time", "queue_sec"],
-    "result": ["result", "status", "outcome", "win_lose", "success"],
+    "uid": [
+        "uid",
+        "user_id",
+        "userid",
+        "player_id",
+        "account_id",
+        "member_id",
+        "account_no",
+        "acct",
+        "user_no",
+        "player_no",
+        "character_id",
+        "char_id",
+        "유저ID",
+        "유저아이디",
+        "사용자ID",
+        "계정ID",
+        "회원ID",
+        "캐릭터ID",
+    ],
+    "timestamp": [
+        "event_time",
+        "timestamp",
+        "time",
+        "created_at",
+        "log_dt",
+        "log_at",
+        "log_time",
+        "event_dt",
+        "occurred_at",
+        "reg_dt",
+        "dt",
+        "date",
+        "일시",
+        "시간",
+        "로그시간",
+        "이벤트시간",
+        "발생시간",
+        "생성일시",
+        "등록일시",
+    ],
+    "event": [
+        "event_name",
+        "event",
+        "action",
+        "action_type",
+        "log_name",
+        "log_code",
+        "log_id",
+        "event_type",
+        "behavior",
+        "activity",
+        "이벤트명",
+        "이벤트",
+        "로그명",
+        "로그코드",
+        "행동",
+        "액션",
+    ],
+    "content_id": [
+        "content_id",
+        "content",
+        "mode",
+        "area",
+        "place",
+        "stage_id",
+        "stage_no",
+        "dungeon_id",
+        "raid_id",
+        "level_id",
+        "chapter_id",
+        "map_id",
+        "mode_id",
+        "콘텐츠ID",
+        "컨텐츠ID",
+        "스테이지ID",
+        "던전ID",
+        "레이드ID",
+        "레벨ID",
+        "챕터ID",
+    ],
+    "product_id": [
+        "product_id",
+        "package_id",
+        "sku",
+        "shop_item",
+        "item_id",
+        "goods_id",
+        "상품ID",
+        "패키지ID",
+        "아이템ID",
+        "상점아이템",
+        "상품코드",
+    ],
+    "amount": [
+        "amount",
+        "price",
+        "paid_amount",
+        "revenue",
+        "purchase_value",
+        "cash_amount",
+        "krw",
+        "won",
+        "currency",
+        "sales",
+        "cost",
+        "금액",
+        "가격",
+        "매출",
+        "결제금액",
+        "구매금액",
+        "판매금액",
+    ],
+    "duration_sec": [
+        "duration_sec",
+        "duration",
+        "play_time",
+        "stay_time",
+        "elapsed_sec",
+        "elapsed_time",
+        "소요시간",
+        "플레이시간",
+        "체류시간",
+        "진행시간",
+    ],
+    "wait_time_sec": [
+        "wait_time",
+        "wait_time_sec",
+        "matching_wait",
+        "match_wait",
+        "queue_time",
+        "queue_sec",
+        "대기시간",
+        "매칭대기",
+        "매칭대기시간",
+        "큐시간",
+    ],
+    "result": [
+        "result",
+        "status",
+        "state",
+        "outcome",
+        "win_lose",
+        "success",
+        "result_code",
+        "결과",
+        "상태",
+        "성공여부",
+        "승패",
+    ],
 }
+
+FAIL_RESULTS = {"fail", "failed", "failure", "lose", "loss", "lost", "error", "drop", "cancel", "abandon", "실패", "패배", "이탈"}
+SUCCESS_RESULTS = {"success", "succeed", "succeeded", "clear", "cleared", "win", "won", "complete", "completed", "성공", "클리어", "승리", "완료"}
+TIMEOUT_RESULTS = {"timeout", "timedout", "time_out", "시간초과", "타임아웃"}
 
 TOKEN_LABELS = {
     "evt": "",
@@ -65,7 +210,7 @@ TOKEN_LABELS = {
 
 
 def normalized_name(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+    return re.sub(r"[^a-z0-9가-힣]+", "", str(name).lower())
 
 
 def guess_field(columns: list[str], aliases: list[str]) -> str | None:
@@ -81,6 +226,112 @@ def guess_field(columns: list[str], aliases: list[str]) -> str | None:
     return None
 
 
+def _sample_text(series: pd.Series, limit: int = 1000) -> pd.Series:
+    return series.dropna().astype(str).str.strip().replace({"": pd.NA}).dropna().head(limit)
+
+
+def _numeric_ratio(series: pd.Series) -> float:
+    sample = _sample_text(series)
+    if sample.empty:
+        return 0.0
+    return float(pd.to_numeric(sample, errors="coerce").notna().mean())
+
+
+def _datetime_ratio(series: pd.Series) -> float:
+    sample = _sample_text(series)
+    if sample.empty:
+        return 0.0
+    date_like = sample.str.contains(r"\d{4}[-/년]|\d{1,2}:\d{2}", regex=True).mean()
+    if date_like < 0.4:
+        return 0.0
+    return float(pd.to_datetime(sample, errors="coerce").notna().mean())
+
+
+def _result_ratio(series: pd.Series) -> float:
+    sample = _sample_text(series)
+    if sample.empty:
+        return 0.0
+    normalized = sample.str.lower().str.replace(r"[^a-z0-9가-힣]+", "", regex=True)
+    known = FAIL_RESULTS | SUCCESS_RESULTS | TIMEOUT_RESULTS | {"true", "false", "yes", "no", "y", "n", "0", "1"}
+    return float(normalized.isin(known).mean())
+
+
+def _text_signal_ratio(series: pd.Series) -> float:
+    sample = _sample_text(series)
+    if sample.empty:
+        return 0.0
+    return float(sample.str.contains(r"[A-Za-z가-힣_]", regex=True).mean())
+
+
+def _unique_ratio(series: pd.Series) -> float:
+    sample = _sample_text(series)
+    if sample.empty:
+        return 0.0
+    return float(sample.nunique(dropna=True) / len(sample))
+
+
+def _unused_columns(frame: pd.DataFrame, guessed: FieldMapping) -> list[str]:
+    used = {value for value in guessed.to_dict().values() if value}
+    return [str(column) for column in frame.columns if str(column) not in used]
+
+
+def _best_column(frame: pd.DataFrame, candidates: list[str], scorer: Any, minimum: float) -> str | None:
+    scored = []
+    for column in candidates:
+        score = scorer(frame[column])
+        if score >= minimum:
+            scored.append((score, column))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    return scored[0][1]
+
+
+def _infer_fields_from_values(frame: pd.DataFrame, guessed: FieldMapping) -> None:
+    if frame.empty:
+        return
+
+    if not guessed.timestamp:
+        guessed.timestamp = _best_column(frame, _unused_columns(frame, guessed), _datetime_ratio, 0.7)
+
+    if not guessed.result:
+        guessed.result = _best_column(frame, _unused_columns(frame, guessed), _result_ratio, 0.45)
+
+    if not guessed.uid:
+        def uid_score(series: pd.Series) -> float:
+            sample = _sample_text(series)
+            if sample.empty or _numeric_ratio(series) > 0.95 or _datetime_ratio(series) > 0.2:
+                return 0.0
+            return _unique_ratio(series) * _text_signal_ratio(series)
+
+        guessed.uid = _best_column(frame, _unused_columns(frame, guessed), uid_score, 0.55)
+
+    if not guessed.event:
+        def event_score(series: pd.Series) -> float:
+            sample = _sample_text(series)
+            if sample.empty or _numeric_ratio(series) > 0.8 or _datetime_ratio(series) > 0.2:
+                return 0.0
+            unique = sample.nunique(dropna=True)
+            if unique < 2:
+                return 0.0
+            unique_ratio = unique / len(sample)
+            if unique_ratio > 0.55:
+                return 0.0
+            return _text_signal_ratio(series) * (1 - abs(unique_ratio - 0.08))
+
+        guessed.event = _best_column(frame, _unused_columns(frame, guessed), event_score, 0.45)
+
+    if not guessed.amount:
+        def amount_score(series: pd.Series) -> float:
+            sample = pd.to_numeric(_sample_text(series), errors="coerce").dropna()
+            if sample.empty:
+                return 0.0
+            positive_ratio = float((sample > 0).mean())
+            return _numeric_ratio(series) * positive_ratio
+
+        guessed.amount = _best_column(frame, _unused_columns(frame, guessed), amount_score, 0.25)
+
+
 def infer_fields(frame: pd.DataFrame, config: LanguageConfig) -> FieldMapping:
     columns = [str(column) for column in frame.columns]
     explicit = config.fields
@@ -89,6 +340,7 @@ def infer_fields(frame: pd.DataFrame, config: LanguageConfig) -> FieldMapping:
         configured = getattr(explicit, field_name)
         value = configured if configured in frame.columns else guess_field(columns, aliases)
         setattr(guessed, field_name, value)
+    _infer_fields_from_values(frame, guessed)
     return guessed
 
 
@@ -146,6 +398,43 @@ def infer_event_type(raw: str) -> str:
     if {"exit", "end", "drop"} & tokens:
         return "exit"
     return "event"
+
+
+def infer_event_type_from_shape(
+    current_event_type: str,
+    product_id: Any = None,
+    amount: Any = 0,
+    wait_time_sec: Any = 0,
+    result: Any = None,
+    content_id: Any = None,
+    group: Any = None,
+) -> str:
+    if current_event_type != "event":
+        return current_event_type
+
+    product_text = "" if product_id is None or pd.isna(product_id) else str(product_id).strip()
+    content_text = "" if content_id is None or pd.isna(content_id) else str(content_id).strip()
+    group_text = "" if group is None or pd.isna(group) else str(group).strip()
+    result_text = "" if result is None or pd.isna(result) else str(result).strip().lower()
+    result_key = re.sub(r"[^a-z0-9가-힣]+", "", result_text)
+    numeric_amount = pd.to_numeric(pd.Series([amount]), errors="coerce").fillna(0).iloc[0]
+    numeric_wait = pd.to_numeric(pd.Series([wait_time_sec]), errors="coerce").fillna(0).iloc[0]
+    has_product = bool(product_text and product_text.lower() != "nan")
+    has_content = bool((content_text and content_text.lower() != "nan") or (group_text and group_text.lower() != "nan"))
+
+    if has_product and float(numeric_amount) > 0:
+        return "purchase"
+    if float(numeric_wait) > 0 or result_key in TIMEOUT_RESULTS:
+        return "match_issue"
+    if has_content and result_key in FAIL_RESULTS:
+        return "content_fail"
+    if has_content and result_key in SUCCESS_RESULTS:
+        return "content_success"
+    if has_product:
+        return "product_view"
+    if has_content:
+        return "content_enter"
+    return current_event_type
 
 
 def readable_label(raw: str) -> str:

@@ -5,7 +5,7 @@ from typing import Any
 import pandas as pd
 
 from .config import FieldMapping, LanguageConfig
-from .language import classify_event, infer_fields, label_content, label_product
+from .language import classify_event, infer_event_type_from_shape, infer_fields, label_content, label_product
 
 
 STANDARD_COLUMNS = [
@@ -49,8 +49,7 @@ def normalize_frame(frame: pd.DataFrame, config: LanguageConfig) -> tuple[pd.Dat
 
     event_series = _series_or_default(frame, fields.event)
     if event_series.isna().all():
-        has_purchase_shape = bool(fields.product_id and fields.amount)
-        event_series = pd.Series(["purchase" if has_purchase_shape else "event"] * len(frame), index=frame.index)
+        event_series = pd.Series(["event"] * len(frame), index=frame.index)
     normalized["event_raw"] = event_series.fillna("event").astype(str)
 
     normalized["content_id"] = _series_or_default(frame, fields.content_id, None)
@@ -92,6 +91,18 @@ def normalize_frame(frame: pd.DataFrame, config: LanguageConfig) -> tuple[pd.Dat
         inferred_with_content_label,
         "content_label",
     ]
+    normalized["event_type"] = normalized.apply(
+        lambda row: infer_event_type_from_shape(
+            row["event_type"],
+            product_id=row["product_id"],
+            amount=row["amount"],
+            wait_time_sec=row["wait_time_sec"],
+            result=row["result"],
+            content_id=row["content_id"],
+            group=row["group"],
+        ),
+        axis=1,
+    )
 
     product_labels = normalized["product_id"].map(lambda value: label_product(value, config))
     normalized["product_label"] = product_labels.map(lambda value: value[0])

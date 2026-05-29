@@ -28,9 +28,11 @@ def _sql_literal(value: str) -> str:
 
 
 def _csv_relation(path: Path) -> str:
-    options = ["all_varchar=true", "header=true"]
+    options = ["all_varchar=true", "header=true", "strict_mode=false", "null_padding=true"]
     if path.suffix.lower() == ".tsv":
         options.append("delim='\\t'")
+    elif path.suffix.lower() == ".csv":
+        options.append("delim=','")
     return f"read_csv_auto({_sql_literal(str(path))}, {', '.join(options)})"
 
 
@@ -138,10 +140,49 @@ def _product_label_frame(product_values: list[str], config: LanguageConfig) -> p
     )
 
 
+def _final_group_expr(alias: str = "classified") -> str:
+    return f"""
+    CASE
+        WHEN {alias}.language_source != 'dictionary'
+         AND content_labels_in.configured_content_label IS NOT NULL
+        THEN content_labels_in.configured_content_label
+        ELSE {alias}."group"
+    END
+    """
+
+
+def _row_shape_event_type_expr(alias: str = "classified") -> str:
+    final_group = _final_group_expr(alias)
+    result_key = f"REGEXP_REPLACE(LOWER(COALESCE(CAST({alias}.result AS VARCHAR), '')), '[^a-z0-9가-힣]+', '', 'g')"
+    has_product = f"NULLIF(TRIM(COALESCE(CAST({alias}.product_id AS VARCHAR), '')), '') IS NOT NULL"
+    has_content = (
+        f"NULLIF(TRIM(COALESCE(CAST({alias}.content_id AS VARCHAR), '')), '') IS NOT NULL "
+        f"OR NULLIF(TRIM(COALESCE(CAST(({final_group}) AS VARCHAR), '')), '') IS NOT NULL"
+    )
+    return f"""
+    CASE
+        WHEN {alias}.event_type != 'event' THEN {alias}.event_type
+        WHEN {has_product} AND COALESCE({alias}.amount, 0) > 0 THEN 'purchase'
+        WHEN COALESCE({alias}.wait_time_sec, 0) > 0
+          OR {result_key} IN ('timeout', 'timedout', 'timeout', '시간초과', '타임아웃')
+        THEN 'match_issue'
+        WHEN ({has_content})
+          AND {result_key} IN ('fail', 'failed', 'failure', 'lose', 'loss', 'lost', 'error', 'drop', 'cancel', 'abandon', '실패', '패배', '이탈')
+        THEN 'content_fail'
+        WHEN ({has_content})
+          AND {result_key} IN ('success', 'succeed', 'succeeded', 'clear', 'cleared', 'win', 'won', 'complete', 'completed', '성공', '클리어', '승리', '완료')
+        THEN 'content_success'
+        WHEN {has_product} THEN 'product_view'
+        WHEN ({has_content}) THEN 'content_enter'
+        ELSE {alias}.event_type
+    END
+    """
+
+
 def _require_fields(fields: FieldMapping, path: Path) -> None:
     missing = [
         name
-        for name in ("uid", "timestamp", "event")
+        for name in ("uid",)
         if getattr(fields, name) is None
     ]
     if missing:
@@ -155,7 +196,8 @@ def _normalize_file(path: Path, config: LanguageConfig) -> tuple[RawTableInfo, p
         con.execute(f"CREATE TEMP VIEW raw_in AS SELECT * FROM {_csv_relation(path)}")
         columns = _describe_columns(con)
         row_count = int(con.execute("SELECT COUNT(*) FROM raw_in").fetchone()[0])
-        fields = infer_fields(_empty_frame(columns), config)
+        sample = con.execute("SELECT * FROM raw_in LIMIT 1000").fetchdf()
+        fields = infer_fields(sample if not sample.empty else _empty_frame(columns), config)
         _require_fields(fields, path)
         uid_value_expr = _text_expr(fields.uid)
         missing_uid_rows = int(
@@ -168,7 +210,7 @@ def _normalize_file(path: Path, config: LanguageConfig) -> tuple[RawTableInfo, p
             ).fetchone()[0]
         )
 
-        event_values = _distinct_event_values(con, fields.event or "")
+        event_values = _distinct_event_values(con, fields.event) if fields.event else ["event"]
         product_values = _distinct_text_values(con, fields.product_id)
 
         con.register("event_labels_in", _event_label_frame(event_values, config))
@@ -216,13 +258,8 @@ def _normalize_file(path: Path, config: LanguageConfig) -> tuple[RawTableInfo, p
                 classified.ts,
                 classified.event_raw,
                 classified.event_label,
-                classified.event_type,
-                CASE
-                    WHEN classified.language_source != 'dictionary'
-                     AND content_labels_in.configured_content_label IS NOT NULL
-                    THEN content_labels_in.configured_content_label
-                    ELSE classified."group"
-                END AS "group",
+                {_row_shape_event_type_expr()} AS event_type,
+                {_final_group_expr()} AS "group",
                 classified.content_id,
                 CASE
                     WHEN classified.content_id IS NULL THEN classified."group"

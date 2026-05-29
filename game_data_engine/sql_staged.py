@@ -20,10 +20,12 @@ from .sql_normalize import (
     _distinct_text_values,
     _empty_frame,
     _event_label_frame,
+    _final_group_expr,
     _number_expr,
     _product_label_frame,
     _quote_identifier,
     _require_fields,
+    _row_shape_event_type_expr,
     _sql_literal,
     _text_expr,
 )
@@ -139,7 +141,8 @@ def _insert_file(
     con.execute(f"CREATE TEMP VIEW raw_in AS SELECT * FROM {_csv_relation(path)}")
     columns = _describe_columns(con)
     row_count = int(con.execute("SELECT COUNT(*) FROM raw_in").fetchone()[0])
-    fields = infer_fields(_empty_frame(columns), config)
+    sample = con.execute("SELECT * FROM raw_in LIMIT 1000").fetchdf()
+    fields = infer_fields(sample if not sample.empty else _empty_frame(columns), config)
     _require_fields(fields, path)
     uid_value_expr = _text_expr(fields.uid)
     missing_uid_rows = int(
@@ -152,7 +155,7 @@ def _insert_file(
         ).fetchone()[0]
     )
 
-    event_values = _distinct_event_values(con, fields.event or "")
+    event_values = _distinct_event_values(con, fields.event) if fields.event else ["event"]
     product_values = _distinct_text_values(con, fields.product_id)
     _register_frame(con, "event_labels_in", _event_label_frame(event_values, config))
     _register_frame(con, "content_labels_in", _content_label_frame(config))
@@ -208,13 +211,8 @@ def _insert_file(
             classified.ts,
             classified.event_raw,
             classified.event_label,
-            classified.event_type,
-            CASE
-                WHEN classified.language_source != 'dictionary'
-                 AND content_labels_in.configured_content_label IS NOT NULL
-                THEN content_labels_in.configured_content_label
-                ELSE classified."group"
-            END AS "group",
+            {_row_shape_event_type_expr()} AS event_type,
+            {_final_group_expr()} AS "group",
             classified.content_id,
             CASE
                 WHEN classified.content_id IS NULL THEN classified."group"
