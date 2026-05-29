@@ -37,7 +37,7 @@ def _csv_relation(path: Path) -> str:
 def _text_expr(column: str | None, default: str = "NULL", blank_to_null: bool = True) -> str:
     if not column:
         return default
-    value = f"CAST({_quote_identifier(column)} AS VARCHAR)"
+    value = f"TRIM(CAST({_quote_identifier(column)} AS VARCHAR))"
     if blank_to_null:
         return f"NULLIF({value}, '')"
     return value
@@ -157,6 +157,16 @@ def _normalize_file(path: Path, config: LanguageConfig) -> tuple[RawTableInfo, p
         row_count = int(con.execute("SELECT COUNT(*) FROM raw_in").fetchone()[0])
         fields = infer_fields(_empty_frame(columns), config)
         _require_fields(fields, path)
+        uid_value_expr = _text_expr(fields.uid)
+        missing_uid_rows = int(
+            con.execute(
+                f"""
+                SELECT COUNT(*)::BIGINT
+                FROM raw_in
+                WHERE {uid_value_expr} IS NULL
+                """
+            ).fetchone()[0]
+        )
 
         event_values = _distinct_event_values(con, fields.event or "")
         product_values = _distinct_text_values(con, fields.product_id)
@@ -245,6 +255,7 @@ def _normalize_file(path: Path, config: LanguageConfig) -> tuple[RawTableInfo, p
         "rows": row_count,
         "fields": fields.to_dict(),
         "normalize_engine": "duckdb",
+        "missing_uid_rows": missing_uid_rows,
     }
     return info, normalized[STANDARD_COLUMNS], report
 

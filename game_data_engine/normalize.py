@@ -43,7 +43,8 @@ def _numeric(series: pd.Series) -> pd.Series:
 def normalize_frame(frame: pd.DataFrame, config: LanguageConfig) -> tuple[pd.DataFrame, FieldMapping]:
     fields = infer_fields(frame, config)
     normalized = pd.DataFrame(index=frame.index)
-    normalized["uid"] = _series_or_default(frame, fields.uid, "").astype(str)
+    uid_values = _series_or_default(frame, fields.uid, "")
+    normalized["uid"] = uid_values.where(uid_values.notna(), "").astype(str).str.strip()
     normalized["ts"] = pd.to_datetime(_series_or_default(frame, fields.timestamp, pd.NaT), errors="coerce")
 
     event_series = _series_or_default(frame, fields.event)

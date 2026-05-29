@@ -126,6 +126,19 @@ TABLE_COLUMNS = {
         "source_files_json",
         "stored_at",
     ],
+    "mart.daily_summaries": [
+        "run_id",
+        "event_date",
+        "active_users",
+        "events",
+        "sessions",
+        "avg_session_duration_sec",
+        "revenue",
+        "paying_users",
+        "conversion_rate",
+        "arppu",
+        "stored_at",
+    ],
     "mart.run_artifacts": [
         "run_id",
         "artifact_type",
@@ -197,7 +210,10 @@ def _insert_frame(con: duckdb.DuckDBPyConnection, table: str, frame: pd.DataFram
 
 
 def _count_run_rows(con: duckdb.DuckDBPyConnection, table: str, run_id: str) -> int:
-    return int(con.execute(f"SELECT COUNT(*) FROM {_quote_table(table)} WHERE run_id = ?", [run_id]).fetchone()[0])
+    try:
+        return int(con.execute(f"SELECT COUNT(*) FROM {_quote_table(table)} WHERE run_id = ?", [run_id]).fetchone()[0])
+    except duckdb.CatalogException:
+        return 0
 
 
 def _row_dict(cursor: duckdb.DuckDBPyConnection, row: tuple[Any, ...] | None) -> dict[str, Any] | None:
@@ -446,6 +462,27 @@ def _summary_frame(
     )
 
 
+def _daily_summary_frame(run_id: str, summary_by_date: dict[str, Any], stored_at: pd.Timestamp) -> pd.DataFrame:
+    rows = []
+    for item in summary_by_date.get("dates", []):
+        rows.append(
+            {
+                "run_id": run_id,
+                "event_date": item.get("date"),
+                "active_users": int(item.get("active_users", 0)),
+                "events": int(item.get("events", 0)),
+                "sessions": int(item.get("sessions", 0)),
+                "avg_session_duration_sec": float(item.get("avg_session_duration_sec", 0)),
+                "revenue": float(item.get("revenue", 0)),
+                "paying_users": int(item.get("paying_users", 0)),
+                "conversion_rate": float(item.get("conversion_rate", 0)),
+                "arppu": float(item.get("arppu", 0)),
+                "stored_at": stored_at,
+            }
+        )
+    return pd.DataFrame(rows, columns=TABLE_COLUMNS["mart.daily_summaries"])
+
+
 def _artifact_frame(run_id: str, artifacts: dict[str, Any], stored_at: pd.Timestamp) -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -607,6 +644,23 @@ def initialize_warehouse(con: duckdb.DuckDBPyConnection) -> None:
     )
     con.execute(
         """
+        CREATE TABLE IF NOT EXISTS mart.daily_summaries (
+            run_id VARCHAR,
+            event_date DATE,
+            active_users BIGINT,
+            events BIGINT,
+            sessions BIGINT,
+            avg_session_duration_sec DOUBLE,
+            revenue DOUBLE,
+            paying_users BIGINT,
+            conversion_rate DOUBLE,
+            arppu DOUBLE,
+            stored_at TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        """
         CREATE TABLE IF NOT EXISTS mart.run_artifacts (
             run_id VARCHAR,
             artifact_type VARCHAR,
@@ -627,6 +681,7 @@ def store_run(
     content: pd.DataFrame,
     products: pd.DataFrame,
     summary: dict[str, Any],
+    summary_by_date: dict[str, Any],
     data_quality: dict[str, Any],
     artifacts: dict[str, Any],
 ) -> dict[str, Any]:
@@ -641,6 +696,7 @@ def store_run(
         "mart.content_facts": _content_frame(content, run_id, stored_at),
         "mart.product_facts": _product_frame(products, run_id, stored_at),
         "mart.run_summaries": _summary_frame(run_id, summary, data_quality, stored_at),
+        "mart.daily_summaries": _daily_summary_frame(run_id, summary_by_date, stored_at),
         "mart.run_artifacts": _artifact_frame(run_id, artifacts, stored_at),
     }
 
@@ -685,6 +741,7 @@ def store_staged_run(
     raw_frames: list[RawTable],
     products: pd.DataFrame,
     summary: dict[str, Any],
+    summary_by_date: dict[str, Any],
     data_quality: dict[str, Any],
     artifacts: dict[str, Any],
 ) -> dict[str, Any]:
@@ -894,6 +951,12 @@ def store_staged_run(
             )
             _insert_frame(
                 con,
+                "mart.daily_summaries",
+                _daily_summary_frame(run_id, summary_by_date, stored_at),
+                TABLE_COLUMNS["mart.daily_summaries"],
+            )
+            _insert_frame(
+                con,
                 "mart.run_artifacts",
                 _artifact_frame(run_id, artifacts, stored_at),
                 TABLE_COLUMNS["mart.run_artifacts"],
@@ -954,6 +1017,27 @@ def fetch_run_snapshot(warehouse_path: str | Path, run_id: str) -> dict[str, Any
                 [run_id],
             ).fetchall()
         ]
+        try:
+            daily_rows = con.execute(
+                """
+                SELECT
+                    event_date,
+                    active_users,
+                    events,
+                    sessions,
+                    avg_session_duration_sec,
+                    revenue,
+                    paying_users,
+                    conversion_rate,
+                    arppu
+                FROM mart.daily_summaries
+                WHERE run_id = ?
+                ORDER BY event_date
+                """,
+                [run_id],
+            ).fetchall()
+        except duckdb.CatalogException:
+            daily_rows = []
     finally:
         con.close()
 
@@ -964,6 +1048,33 @@ def fetch_run_snapshot(warehouse_path: str | Path, run_id: str) -> dict[str, Any
             "run_id": run_id,
             "table_counts": table_counts,
             "summary": summary,
+            "summary_by_date": {
+                "date_count": len(daily_rows),
+                "dates": [
+                    {
+                        "date": event_date,
+                        "active_users": active_users,
+                        "events": events,
+                        "sessions": sessions,
+                        "avg_session_duration_sec": avg_session_duration_sec,
+                        "revenue": revenue,
+                        "paying_users": paying_users,
+                        "conversion_rate": conversion_rate,
+                        "arppu": arppu,
+                    }
+                    for (
+                        event_date,
+                        active_users,
+                        events,
+                        sessions,
+                        avg_session_duration_sec,
+                        revenue,
+                        paying_users,
+                        conversion_rate,
+                        arppu,
+                    ) in daily_rows
+                ],
+            },
             "sql_summary": sql_summary,
             "summary_validation": summary_validation,
             "source_files": [

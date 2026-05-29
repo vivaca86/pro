@@ -19,8 +19,10 @@ from game_data_engine.journey import (
 from game_data_engine.metrics import (
     content_health as pandas_content_health,
     daily_summary,
+    daily_summary_by_date,
     product_performance as pandas_product_performance,
 )
+from game_data_engine.pipeline import assess_quality
 from game_data_engine.normalize import normalize
 from game_data_engine.sql_facts import build_sql_facts
 from game_data_engine.sql_metrics import (
@@ -47,6 +49,7 @@ class PipelineTest(unittest.TestCase):
 
             self.assertEqual(payload["summary"]["active_users"], 10)
             self.assertEqual(payload["summary"]["paying_users"], 3)
+            self.assertEqual(payload["summary_by_date"]["date_count"], 1)
             self.assertEqual(payload["journeys"]["user_count"], 10)
             self.assertEqual(payload["data_quality"]["field_reports"][0]["normalize_engine"], "duckdb")
             self.assertEqual(payload["data_quality"]["field_reports"][0]["execution_engine"], "duckdb_staged")
@@ -90,11 +93,16 @@ class PipelineTest(unittest.TestCase):
                     """,
                     ["test-run"],
                 ).fetchone()
+                daily_count = con.execute(
+                    "SELECT COUNT(*) FROM mart.daily_summaries WHERE run_id = ?",
+                    ["test-run"],
+                ).fetchone()[0]
             finally:
                 con.close()
 
             self.assertEqual(normalized_count, 45)
             self.assertEqual(summary, (10, 45, 3))
+            self.assertEqual(daily_count, 1)
 
             snapshot = fetch_run_snapshot(warehouse, "test-run")
             self.assertEqual(snapshot["status"], "found")
@@ -102,6 +110,7 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(snapshot["sql_summary"]["paying_users"], 3)
             self.assertEqual(snapshot["summary_validation"]["status"], "match")
             self.assertEqual(snapshot["table_counts"]["mart.run_summaries"], 1)
+            self.assertEqual(snapshot["summary_by_date"]["date_count"], 1)
             self.assertEqual(snapshot["source_files"][0]["row_count"], 45)
 
     def test_benchmark_generates_synthetic_run(self) -> None:
@@ -178,6 +187,76 @@ class PipelineTest(unittest.TestCase):
         expected_products = pandas_product_performance(events, purchases).reset_index(drop=True)
         actual_products = sql_product_performance(events, purchases).reset_index(drop=True)
         pd.testing.assert_frame_equal(actual_products, expected_products, check_dtype=False)
+
+    def test_missing_uid_rows_affect_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing_uid.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "uid,event_time,event_name,content_id,product_id,amount,duration_sec,wait_time_sec,result",
+                        ",2026-05-28 00:00:00,login,,,0,0,0,success",
+                        "u1,2026-05-28 00:01:00,login,,,0,0,0,success",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            payload = run_pipeline(
+                inputs=[path],
+                dictionary_path=Path("examples/log_language.json"),
+                sample_limit=1,
+            )
+
+            self.assertEqual(payload["data_quality"]["input_rows"], 2)
+            self.assertEqual(payload["data_quality"]["normalized_rows"], 1)
+            self.assertEqual(payload["data_quality"]["missing_uid_rows"], 1)
+            self.assertLess(payload["data_quality"]["quality_score"], 1)
+
+    def test_staged_pipeline_matches_pandas_quality_and_daily_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "parity.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "uid,event_time,event_name,content_id,product_id,amount,duration_sec,wait_time_sec,result",
+                        "u1,2026-05-28 00:00:00,login,,,0,0,0,success",
+                        "u1,2026-05-28 00:00:00,login,,,0,0,0,success",
+                        "u1,2026-05-28 00:05:00,pkg_starter_buy,,starter_pack,9900,0,0,success",
+                        "u2,2026-05-29 00:00:00,login,,,0,0,0,success",
+                        "u2,2026-05-29 00:07:00,pkg_raid_buy,,raid_pack,55000,0,0,success",
+                        ",2026-05-29 00:08:00,login,,,0,0,0,success",
+                        "u3,,login,,,0,0,0,success",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = LanguageConfig.load(Path("examples/log_language.json"))
+
+            staged = run_pipeline(
+                inputs=[path],
+                dictionary_path=Path("examples/log_language.json"),
+                sample_limit=2,
+            )
+            raw_frames = ingest([path])
+            normalized, reports = normalize(raw_frames, config)
+            events, sessions, _, _, _ = build_sql_facts(normalized, config.session_gap_minutes)
+            pandas_summary = daily_summary(events, sessions)
+            pandas_summary_by_date = daily_summary_by_date(events, sessions)
+            pandas_quality = assess_quality(raw_frames, events, reports)
+
+            self.assertEqual(staged["summary"], pandas_summary)
+            self.assertEqual(staged["summary_by_date"], pandas_summary_by_date)
+            for key in [
+                "input_rows",
+                "normalized_rows",
+                "missing_uid_rows",
+                "missing_timestamp_rows",
+                "duplicate_event_rows",
+                "inferred_language_rows",
+                "quality_score",
+            ]:
+                self.assertEqual(staged["data_quality"][key], pandas_quality[key], key)
 
 
 if __name__ == "__main__":

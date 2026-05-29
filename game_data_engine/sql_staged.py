@@ -35,6 +35,7 @@ class StagedAnalysis:
     raw_tables: list[RawTableInfo]
     field_reports: list[dict[str, Any]]
     summary: dict[str, Any]
+    summary_by_date: dict[str, Any]
     data_quality: dict[str, Any]
     language_suggestions: list[dict[str, Any]]
     sessions: dict[str, Any]
@@ -140,6 +141,16 @@ def _insert_file(
     row_count = int(con.execute("SELECT COUNT(*) FROM raw_in").fetchone()[0])
     fields = infer_fields(_empty_frame(columns), config)
     _require_fields(fields, path)
+    uid_value_expr = _text_expr(fields.uid)
+    missing_uid_rows = int(
+        con.execute(
+            f"""
+            SELECT COUNT(*)::BIGINT
+            FROM raw_in
+            WHERE {uid_value_expr} IS NULL
+            """
+        ).fetchone()[0]
+    )
 
     event_values = _distinct_event_values(con, fields.event or "")
     product_values = _distinct_text_values(con, fields.product_id)
@@ -232,12 +243,12 @@ def _insert_file(
         "fields": fields.to_dict(),
         "normalize_engine": "duckdb",
         "execution_engine": "duckdb_staged",
+        "missing_uid_rows": missing_uid_rows,
     }
     return info, report, source_offset + row_count
 
 
 def _create_events_ordered(con: duckdb.DuckDBPyConnection, session_gap_minutes: int) -> None:
-    con.execute("DELETE FROM normalized_base WHERE uid IS NULL OR CAST(uid AS VARCHAR) = ''")
     con.execute(
         """
         CREATE TABLE events_ordered AS
@@ -249,6 +260,7 @@ def _create_events_ordered(con: duckdb.DuckDBPyConnection, session_gap_minutes: 
                     ORDER BY ts NULLS LAST, _source_order
                 ) AS previous_ts
             FROM normalized_base
+            WHERE uid IS NOT NULL AND TRIM(CAST(uid AS VARCHAR)) <> ''
         ),
         flagged AS (
             SELECT
@@ -819,11 +831,93 @@ def _summary(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     return _jsonable(dict(zip(columns, row or [0] * len(columns))))
 
 
+def _summary_by_date(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    rows = con.execute(
+        """
+        WITH event_days AS (
+            SELECT
+                CAST(ts AS DATE) AS event_date,
+                COUNT(*)::BIGINT AS events,
+                COUNT(DISTINCT uid)::BIGINT AS active_users,
+                COUNT(DISTINCT CASE WHEN event_type = 'purchase' THEN uid END)::BIGINT AS paying_users,
+                COALESCE(SUM(CASE WHEN event_type = 'purchase' THEN amount ELSE 0 END), 0)::DOUBLE AS revenue
+            FROM events_ordered
+            WHERE ts IS NOT NULL
+            GROUP BY CAST(ts AS DATE)
+        ),
+        session_days AS (
+            SELECT
+                CAST(start AS DATE) AS event_date,
+                COUNT(*)::BIGINT AS sessions,
+                COALESCE(AVG(duration_sec), 0)::DOUBLE AS avg_session_duration_sec
+            FROM session_facts
+            WHERE start IS NOT NULL
+            GROUP BY CAST(start AS DATE)
+        )
+        SELECT
+            CAST(event_days.event_date AS VARCHAR) AS date,
+            event_days.active_users,
+            event_days.events,
+            COALESCE(session_days.sessions, 0)::BIGINT AS sessions,
+            ROUND(COALESCE(session_days.avg_session_duration_sec, 0), 2)::DOUBLE AS avg_session_duration_sec,
+            ROUND(event_days.revenue, 2)::DOUBLE AS revenue,
+            event_days.paying_users,
+            ROUND(
+                CASE
+                    WHEN event_days.active_users = 0 THEN 0
+                    ELSE event_days.paying_users::DOUBLE / event_days.active_users
+                END,
+                4
+            )::DOUBLE AS conversion_rate,
+            ROUND(
+                CASE
+                    WHEN event_days.paying_users = 0 THEN 0
+                    ELSE event_days.revenue / event_days.paying_users
+                END,
+                2
+            )::DOUBLE AS arppu
+        FROM event_days
+        LEFT JOIN session_days USING (event_date)
+        ORDER BY event_days.event_date
+        """
+    ).fetchall()
+    unknown_timestamp_events = int(
+        con.execute("SELECT COUNT(*)::BIGINT FROM events_ordered WHERE ts IS NULL").fetchone()[0]
+    )
+    columns = [
+        "date",
+        "active_users",
+        "events",
+        "sessions",
+        "avg_session_duration_sec",
+        "revenue",
+        "paying_users",
+        "conversion_rate",
+        "arppu",
+    ]
+    date_rows = [_jsonable(dict(zip(columns, row))) for row in rows]
+    return {
+        "date_count": len(date_rows),
+        "dates": date_rows,
+        "unknown_timestamp_events": unknown_timestamp_events,
+    }
+
+
 def _data_quality(
     con: duckdb.DuckDBPyConnection,
     raw_tables: list[RawTableInfo],
     field_reports: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    base_row = con.execute(
+        """
+        SELECT
+            COUNT(*)::BIGINT AS input_rows,
+            COUNT(*) FILTER (
+                WHERE uid IS NULL OR TRIM(CAST(uid AS VARCHAR)) = ''
+            )::BIGINT AS missing_uid_rows
+        FROM normalized_base
+        """
+    ).fetchone()
     row = con.execute(
         """
         SELECT
@@ -836,7 +930,7 @@ def _data_quality(
     duplicate_events = int(
         con.execute(
             """
-            SELECT COUNT(*)::BIGINT
+            SELECT COALESCE(SUM(count - 1), 0)::BIGINT
             FROM (
                 SELECT
                     uid,
@@ -853,19 +947,21 @@ def _data_quality(
             """
         ).fetchone()[0]
     )
+    input_rows = int(base_row[0] or 0)
     normalized_rows = int(row[0] or 0)
-    missing_uid = 0
+    missing_uid = int(base_row[1] or 0)
     missing_ts = int(row[1] or 0)
     inferred_language = int(row[2] or 0)
+    denominator = max(input_rows, normalized_rows, 1)
     quality_score = max(
         0,
         round(
             1
             - (
-                (missing_uid / max(normalized_rows, 1)) * 0.35
-                + (missing_ts / max(normalized_rows, 1)) * 0.25
-                + (duplicate_events / max(normalized_rows, 1)) * 0.2
-                + (inferred_language / max(normalized_rows, 1)) * 0.2
+                (missing_uid / denominator) * 0.35
+                + (missing_ts / denominator) * 0.25
+                + (duplicate_events / denominator) * 0.2
+                + (inferred_language / denominator) * 0.2
             ),
             3,
         ),
@@ -879,6 +975,7 @@ def _data_quality(
             }
             for info in raw_tables
         ],
+        "input_rows": input_rows,
         "normalized_rows": normalized_rows,
         "field_reports": field_reports,
         "missing_uid_rows": missing_uid,
@@ -1066,6 +1163,7 @@ def build_staged_analysis(
         content = con.execute("SELECT * FROM content_facts ORDER BY participant_rate ASC, revenue_after_content DESC").fetchdf()
         failures = con.execute("SELECT * FROM failure_contexts ORDER BY failure_events DESC, \"group\"").fetchdf()
         summary = _summary(con)
+        summary_by_date = _summary_by_date(con)
         data_quality = _data_quality(con, raw_tables, field_reports)
         language_suggestions = _language_suggestions(con)
         sessions = _sample_sessions(con, sample_limit)
@@ -1080,6 +1178,7 @@ def build_staged_analysis(
         raw_tables=raw_tables,
         field_reports=field_reports,
         summary=summary,
+        summary_by_date=summary_by_date,
         data_quality=data_quality,
         language_suggestions=language_suggestions,
         sessions=sessions,

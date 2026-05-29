@@ -13,6 +13,7 @@ from .ingest import RawTable, describe_raw_table, ingest
 from .language import build_language_suggestions
 from .metrics import (
     daily_summary,
+    daily_summary_by_date,
     segment_compare,
     whale_concentration,
 )
@@ -67,6 +68,7 @@ def _artifact_payloads(payload: dict[str, Any]) -> dict[str, Any]:
             "engine_version": payload["engine_version"],
             "data_quality": payload["data_quality"],
             "summary": payload["summary"],
+            "summary_by_date": payload["summary_by_date"],
             "language": payload["language"],
         },
         "issues.json": {
@@ -137,6 +139,23 @@ def _write_outputs(
             json.dump(_jsonable(payload), handle, ensure_ascii=False, indent=2)
 
 
+def _missing_uid_rows_from_raw(raw_frames: list[RawTable], field_reports: list[dict[str, Any]]) -> int:
+    missing = 0
+    for index, frame in enumerate(raw_frames):
+        if not isinstance(frame, pd.DataFrame):
+            continue
+        report = field_reports[index] if index < len(field_reports) else {}
+        fields = report.get("fields", {})
+        uid_column = fields.get("uid") if isinstance(fields, dict) else None
+        if not uid_column or uid_column not in frame.columns:
+            missing += int(len(frame))
+            continue
+        values = frame[uid_column]
+        text_values = values.astype(str).str.strip().str.lower()
+        missing += int((values.isna() | text_values.isin({"", "nan", "none", "null"})).sum())
+    return missing
+
+
 def _run_staged_pipeline(
     inputs: list[str | Path],
     config: LanguageConfig,
@@ -167,6 +186,7 @@ def _run_staged_pipeline(
         "engine_version": "0.1.0",
         "data_quality": staged.data_quality,
         "summary": staged.summary,
+        "summary_by_date": staged.summary_by_date,
         "language": {
             "suggestions": staged.language_suggestions,
             "needs_confirmation_count": int(staged.data_quality.get("inferred_language_rows", 0)),
@@ -203,6 +223,7 @@ def _run_staged_pipeline(
             raw_frames=staged.raw_tables,
             products=staged.products,
             summary=staged.summary,
+            summary_by_date=staged.summary_by_date,
             data_quality=staged.data_quality,
             artifacts=artifact_payloads,
         )
@@ -216,10 +237,16 @@ def _run_staged_pipeline(
 
 
 def assess_quality(raw_frames: list[RawTable], events: pd.DataFrame, field_reports: list[dict[str, Any]]) -> dict[str, Any]:
-    missing_uid = int((events["uid"].astype(str) == "").sum()) if not events.empty else 0
+    raw_file_infos = [describe_raw_table(frame) for frame in raw_frames]
+    input_rows = sum(info.row_count for info in raw_file_infos)
+    if any("missing_uid_rows" in report for report in field_reports):
+        missing_uid = sum(int(report.get("missing_uid_rows", 0)) for report in field_reports)
+    else:
+        missing_uid = _missing_uid_rows_from_raw(raw_frames, field_reports)
     missing_ts = int(events["ts"].isna().sum()) if not events.empty else 0
     duplicate_events = int(events.duplicated(subset=["uid", "ts", "event_raw", "content_id", "product_id", "amount"]).sum())
     inferred_language = int((events["language_source"] != "dictionary").sum()) if not events.empty else 0
+    denominator = max(input_rows, len(events), 1)
     return {
         "raw_files": [
             {
@@ -227,8 +254,9 @@ def assess_quality(raw_frames: list[RawTable], events: pd.DataFrame, field_repor
                 "rows": info.row_count,
                 "columns": info.columns,
             }
-            for info in (describe_raw_table(frame) for frame in raw_frames)
+            for info in raw_file_infos
         ],
+        "input_rows": int(input_rows),
         "normalized_rows": int(len(events)),
         "field_reports": field_reports,
         "missing_uid_rows": missing_uid,
@@ -240,10 +268,10 @@ def assess_quality(raw_frames: list[RawTable], events: pd.DataFrame, field_repor
             round(
                 1
                 - (
-                    (missing_uid / max(len(events), 1)) * 0.35
-                    + (missing_ts / max(len(events), 1)) * 0.25
-                    + (duplicate_events / max(len(events), 1)) * 0.2
-                    + (inferred_language / max(len(events), 1)) * 0.2
+                    (missing_uid / denominator) * 0.35
+                    + (missing_ts / denominator) * 0.25
+                    + (duplicate_events / denominator) * 0.2
+                    + (inferred_language / denominator) * 0.2
                 ),
                 3,
             ),
@@ -291,6 +319,7 @@ def run_pipeline(
 
     _report_progress(progress_callback, 0.62, "metrics", "지표 계산 중")
     summary = daily_summary(events, sessions)
+    summary_by_date = daily_summary_by_date(events, sessions)
     content = content_health(events, failures)
     products = product_performance(events, purchases)
     segments = segment_compare(events)
@@ -310,6 +339,7 @@ def run_pipeline(
         "engine_version": "0.1.0",
         "data_quality": data_quality,
         "summary": summary,
+        "summary_by_date": summary_by_date,
         "language": {
             "suggestions": language_suggestions,
             "needs_confirmation_count": int((events["language_source"] != "dictionary").sum()),
@@ -355,6 +385,7 @@ def run_pipeline(
             content=content,
             products=products,
             summary=summary,
+            summary_by_date=summary_by_date,
             data_quality=data_quality,
             artifacts=artifact_payloads,
         )

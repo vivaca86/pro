@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 
 
-def daily_summary(events: pd.DataFrame, sessions: pd.DataFrame) -> dict[str, Any]:
+def _summary_for_events(events: pd.DataFrame, sessions: pd.DataFrame) -> dict[str, Any]:
     purchases = events[events["event_type"] == "purchase"]
     active_users = int(events["uid"].nunique())
     paying_users = int(purchases["uid"].nunique())
@@ -22,6 +22,45 @@ def daily_summary(events: pd.DataFrame, sessions: pd.DataFrame) -> dict[str, Any
         "paying_users": paying_users,
         "conversion_rate": round(paying_users / active_users, 4) if active_users else 0,
         "arppu": round(revenue / paying_users, 2) if paying_users else 0,
+    }
+
+
+def daily_summary(events: pd.DataFrame, sessions: pd.DataFrame) -> dict[str, Any]:
+    return _summary_for_events(events, sessions)
+
+
+def daily_summary_by_date(events: pd.DataFrame, sessions: pd.DataFrame) -> dict[str, Any]:
+    if events.empty:
+        return {"date_count": 0, "dates": [], "unknown_timestamp_events": 0}
+
+    events_with_dates = events.copy()
+    events_with_dates["event_date"] = pd.to_datetime(events_with_dates["ts"], errors="coerce").dt.date
+    unknown_timestamp_events = int(events_with_dates["event_date"].isna().sum())
+    known_events = events_with_dates[events_with_dates["event_date"].notna()]
+
+    sessions_with_dates = sessions.copy()
+    if "start" in sessions_with_dates.columns:
+        sessions_with_dates["event_date"] = pd.to_datetime(sessions_with_dates["start"], errors="coerce").dt.date
+    elif "start_ts" in sessions_with_dates.columns:
+        sessions_with_dates["event_date"] = pd.to_datetime(sessions_with_dates["start_ts"], errors="coerce").dt.date
+    else:
+        sessions_with_dates["event_date"] = pd.NaT
+
+    rows: list[dict[str, Any]] = []
+    for event_date in sorted(known_events["event_date"].unique()):
+        day_events = known_events[known_events["event_date"] == event_date].drop(columns=["event_date"])
+        day_sessions = sessions_with_dates[sessions_with_dates["event_date"] == event_date].drop(
+            columns=["event_date"],
+            errors="ignore",
+        )
+        row = _summary_for_events(day_events, day_sessions)
+        row["date"] = event_date.isoformat()
+        rows.append(row)
+
+    return {
+        "date_count": len(rows),
+        "dates": rows,
+        "unknown_timestamp_events": unknown_timestamp_events,
     }
 
 
