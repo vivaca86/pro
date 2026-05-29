@@ -7,6 +7,10 @@ function normalizeApiBase(value) {
 
 function resolveApiBase() {
   const params = new URLSearchParams(location.search);
+  const configuredApiBase = normalizeApiBase(window.GAME_DATA_API_BASE);
+  if (configuredApiBase) {
+    return configuredApiBase;
+  }
   const urlApiBase = normalizeApiBase(params.get("api"));
   if (urlApiBase) {
     localStorage.setItem(API_BASE_STORAGE_KEY, urlApiBase);
@@ -442,7 +446,7 @@ function updateSelectedFiles(files) {
     label.textContent = selectedFiles.length ? selectedFiles.map((file) => file.name).join(", ") : "파일 선택 또는 드래그";
     button.disabled = true;
     setRunProgress(0, false);
-    setUploadStatus("API 서버 주소가 필요합니다. URL에 ?api=https://분석서버주소 를 붙여주세요.", "danger");
+    setUploadStatus("중앙 API 서버가 아직 연결되지 않았습니다.", "danger");
     return;
   }
   if (!selectedFiles.length) {
@@ -461,7 +465,7 @@ function updateSelectedFiles(files) {
 async function uploadAndRun() {
   if (!selectedFiles.length) return;
   if (IS_GITHUB_PAGES && !API_BASE) {
-    setUploadStatus("API 서버 주소가 필요합니다. URL에 ?api=https://분석서버주소 를 붙여주세요.", "danger");
+    setUploadStatus("중앙 API 서버가 아직 연결되지 않았습니다.", "danger");
     return;
   }
   const button = $("#uploadButton");
@@ -517,9 +521,7 @@ async function loadDashboard() {
     selectedIssueIndex = firstDangerIndex >= 0 ? firstDangerIndex : 0;
     render(data);
   } catch (error) {
-    const hint = IS_GITHUB_PAGES && !API_BASE
-      ? " GitHub Pages에서는 URL에 ?api=https://분석서버주소 를 붙여야 업로드/분석이 동작합니다."
-      : "";
+    const hint = IS_GITHUB_PAGES && !API_BASE ? " 중앙 API 서버가 아직 연결되지 않았습니다." : "";
     $("#boardSummary").innerHTML = `
       <div class="error-box">
         ${escapeHtml(error.message + hint)} 로컬 서버 루트에서 실행 중인지 확인해주세요.
@@ -575,7 +577,7 @@ fileDrop.addEventListener("drop", (event) => {
 });
 
 if (IS_GITHUB_PAGES && !API_BASE) {
-  setUploadStatus("API 서버 주소가 필요합니다. URL에 ?api=https://분석서버주소 를 붙여주세요.", "danger");
+  setUploadStatus("중앙 API 서버가 아직 연결되지 않았습니다.", "danger");
 }
 
 loadDashboard();

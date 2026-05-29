@@ -19,10 +19,11 @@ from game_data_engine.warehouse import fetch_run_snapshot
 
 
 ROOT = Path(__file__).resolve().parent
-UPLOAD_DIR = ROOT / "data" / "uploads"
-RUNS_DIR = ROOT / "data" / "runs"
-OUTPUT_DIR = ROOT / "output"
-WAREHOUSE_DB = ROOT / "data" / "warehouse" / "game.duckdb"
+DATA_DIR = Path(os.environ.get("APP_DATA_DIR", ROOT / "data")).resolve()
+UPLOAD_DIR = DATA_DIR / "uploads"
+RUNS_DIR = DATA_DIR / "runs"
+OUTPUT_DIR = Path(os.environ.get("APP_OUTPUT_DIR", DATA_DIR / "output")).resolve()
+WAREHOUSE_DB = DATA_DIR / "warehouse" / "game.duckdb"
 DICTIONARY = ROOT / "examples" / "log_language.json"
 LATEST_RUN = OUTPUT_DIR / "latest_run.json"
 JOB_QUEUE: Queue[tuple[str, list[Path], dict[str, str]]] = Queue()
@@ -68,19 +69,29 @@ def valid_run_id(run_id: str) -> bool:
     return bool(run_id) and all(char.isalnum() or char in {"-", "_"} for char in run_id)
 
 
+def display_path(path: Path) -> str:
+    resolved = path.resolve()
+    for root in (ROOT, DATA_DIR):
+        try:
+            return str(resolved.relative_to(root))
+        except ValueError:
+            pass
+    return str(resolved)
+
+
 def build_storage(run_id: str) -> dict[str, str]:
     run_dir = RUNS_DIR / run_id
     processed_dir = run_dir / "processed"
     return {
         "run_id": run_id,
-        "run_dir": str(run_dir.relative_to(ROOT)),
-        "raw_dir": str((run_dir / "raw").relative_to(ROOT)),
-        "processed_dir": str(processed_dir.relative_to(ROOT)),
-        "analysis_json": str((processed_dir / "analysis.json").relative_to(ROOT)),
-        "normalized_events": str((processed_dir / "normalized_events.csv").relative_to(ROOT)),
-        "warehouse_db": str(WAREHOUSE_DB.relative_to(ROOT)),
-        "latest_analysis_json": str((OUTPUT_DIR / "analysis.json").relative_to(ROOT)),
-        "latest_normalized_events": str((OUTPUT_DIR / "normalized_events.csv").relative_to(ROOT)),
+        "run_dir": display_path(run_dir),
+        "raw_dir": display_path(run_dir / "raw"),
+        "processed_dir": display_path(processed_dir),
+        "analysis_json": display_path(processed_dir / "analysis.json"),
+        "normalized_events": display_path(processed_dir / "normalized_events.csv"),
+        "warehouse_db": display_path(WAREHOUSE_DB),
+        "latest_analysis_json": display_path(OUTPUT_DIR / "analysis.json"),
+        "latest_normalized_events": display_path(OUTPUT_DIR / "normalized_events.csv"),
     }
 
 
@@ -198,8 +209,13 @@ class AppHandler(SimpleHTTPRequestHandler):
         clean = unquote(parsed.path)
         if clean == "/":
             clean = "/index.html"
+        if clean.startswith("/output/"):
+            target = (OUTPUT_DIR / clean.removeprefix("/output/")).resolve()
+            if target == OUTPUT_DIR or target.is_relative_to(OUTPUT_DIR):
+                return str(target)
+            return str(ROOT / "index.html")
         target = (ROOT / clean.lstrip("/")).resolve()
-        if not str(target).startswith(str(ROOT)):
+        if not (target == ROOT or target.is_relative_to(ROOT)):
             return str(ROOT / "index.html")
         return str(target)
 
@@ -236,6 +252,15 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         parts = [part for part in parsed.path.strip("/").split("/") if part]
+        if parsed.path == "/api/health":
+            self._send_json(
+                {
+                    "status": "ok",
+                    "data_dir": display_path(DATA_DIR),
+                    "warehouse_db": display_path(WAREHOUSE_DB),
+                }
+            )
+            return
         if parsed.path == "/api/runs/latest":
             if not LATEST_RUN.exists():
                 self._send_json({"status": "empty", "message": "실행 이력이 없습니다."}, status=404)
@@ -349,8 +374,8 @@ def local_ip() -> str:
 
 def parse_args() -> tuple[str, int]:
     parser = ArgumentParser(description="Serve the Game Data dashboard")
-    parser.add_argument("port", nargs="?", type=int, default=8000)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("port", nargs="?", type=int, default=int(os.environ.get("PORT", "8000")))
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--allow-lan", action="store_true", help="Bind to 0.0.0.0 for LAN testing.")
     args = parser.parse_args()
     host = "0.0.0.0" if args.allow_lan else args.host
