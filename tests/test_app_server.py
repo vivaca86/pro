@@ -75,6 +75,58 @@ class AppServerStorageTest(unittest.TestCase):
             self.assertEqual(saved["event_labels"]["510101"]["event_type"], "session_start")
             self.assertIsNone(saved["event_labels"]["510101"]["group"])
 
+    def test_language_presets_keep_mappings_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_dictionary = app_server.DICTIONARY
+            old_presets_dir = app_server.PRESETS_DIR
+            old_active_preset = app_server.ACTIVE_PRESET
+            try:
+                app_server.DICTIONARY = root / "log_language.json"
+                app_server.PRESETS_DIR = root / "presets"
+                app_server.ACTIVE_PRESET = root / "active_preset.json"
+                app_server.write_json(
+                    app_server.DICTIONARY,
+                    {
+                        "timezone": "Asia/Seoul",
+                        "session_gap_minutes": 30,
+                        "fields": {},
+                        "event_labels": {},
+                        "content_labels": {},
+                        "product_labels": {},
+                    },
+                )
+
+                created = app_server.create_language_preset("Dragon Realm")
+                preset_id = str(created["active_preset_id"])
+                app_server.update_language_dictionary(
+                    [
+                        {
+                            "raw": "unique_preset_code",
+                            "label": "프리셋 전용 로그",
+                            "event_type": "event",
+                            "group": "테스트",
+                        }
+                    ],
+                    preset_id=preset_id,
+                )
+
+                default_dictionary = app_server.read_json(app_server.DICTIONARY)
+                preset_dictionary = app_server.read_json(app_server.PRESETS_DIR / f"{preset_id}.json")
+                presets = app_server.list_language_presets()
+
+                self.assertEqual(app_server.read_active_preset_id(), preset_id)
+                self.assertEqual(presets["active_preset_id"], preset_id)
+                self.assertNotIn("unique_preset_code", default_dictionary["event_labels"])
+                self.assertEqual(
+                    preset_dictionary["event_labels"]["unique_preset_code"]["label"],
+                    "프리셋 전용 로그",
+                )
+            finally:
+                app_server.DICTIONARY = old_dictionary
+                app_server.PRESETS_DIR = old_presets_dir
+                app_server.ACTIVE_PRESET = old_active_preset
+
 
 if __name__ == "__main__":
     unittest.main()

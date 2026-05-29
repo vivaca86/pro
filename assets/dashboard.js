@@ -30,14 +30,19 @@ const DATA_URL = API_BASE ? `${API_BASE}/output/analysis.json` : "./output/analy
 const RUN_URL = API_BASE ? `${API_BASE}/api/run` : "./api/run";
 const RUNS_URL = API_BASE ? `${API_BASE}/api/runs` : "./api/runs";
 const LANGUAGE_URL = API_BASE ? `${API_BASE}/api/language` : "./api/language";
+const LANGUAGE_PRESETS_URL = API_BASE ? `${API_BASE}/api/language/presets` : "./api/language/presets";
+const LANGUAGE_ACTIVE_URL = API_BASE ? `${API_BASE}/api/language/active` : "./api/language/active";
 
 let dashboardData = null;
 let languageConfig = null;
+let languagePresets = [];
+let activePresetId = "default";
 let selectedIssueIndex = 0;
 let selectedFiles = [];
 let showDangerOnly = false;
 let issueSort = "impact";
 let activePoll = null;
+let quickMappingCode = "";
 
 const EVENT_TYPE_OPTIONS = [
   ["event", "일반"],
@@ -53,6 +58,17 @@ const EVENT_TYPE_OPTIONS = [
 ];
 
 const $ = (selector) => document.querySelector(selector);
+
+function apiUnavailable() {
+  return IS_GITHUB_PAGES && !API_BASE;
+}
+
+function withQuery(url, params) {
+  const entries = Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== "");
+  if (!entries.length) return url;
+  const query = new URLSearchParams(entries).toString();
+  return `${url}${url.includes("?") ? "&" : "?"}${query}`;
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -77,6 +93,74 @@ function currency(value) {
 
 function percent(value) {
   return `${(Number(value || 0) * 100).toFixed(1)}%`;
+}
+
+function codeLabel(raw) {
+  const code = String(raw || "").trim();
+  if (!code) return "-";
+  const configured = languageConfig?.event_labels?.[code];
+  const label = configured?.label || code;
+  return label === code ? code : `${label} / ${code}`;
+}
+
+function codeEditButton(raw) {
+  const code = String(raw || "").trim();
+  if (!code || code === "-") return "";
+  return `<button class="quick-map-button" type="button" data-map-code="${escapeHtml(code)}">이름 지정</button>`;
+}
+
+function renderCodeWithAction(raw) {
+  const code = String(raw || "").trim();
+  return `
+    <span class="code-with-action">
+      <span>${escapeHtml(codeLabel(code))}</span>
+      ${codeEditButton(code)}
+    </span>
+  `;
+}
+
+function renderPathWithActions(steps) {
+  const list = (steps || []).map((step) => String(step || "").trim()).filter(Boolean);
+  if (!list.length) return "-";
+  return list.map((step) => renderCodeWithAction(step)).join(`<span class="inline-arrow">→</span>`);
+}
+
+function extractLogCodesFromText(value) {
+  const matches = String(value || "").match(/[A-Za-z0-9_:-]{3,}/g) || [];
+  return matches
+    .map((item) => item.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ""))
+    .filter(
+      (item) =>
+        item &&
+        (item.length >= 4 || item.includes("_")) &&
+        /[0-9_]/.test(item) &&
+        !/^\d{4}-\d{2}-\d{2}$/.test(item),
+    );
+}
+
+function knownLogCodes(data) {
+  const behavior = data?.behavior_flow || {};
+  const codes = new Set();
+  Object.keys(languageConfig?.event_labels || {}).forEach((code) => codes.add(String(code)));
+  (data?.language?.suggestions || []).forEach((item) => item?.raw && codes.add(String(item.raw)));
+  (behavior.participation || behavior.top_codes || []).map(behaviorCode).forEach((item) => item?.code && codes.add(String(item.code)));
+  (behavior.common_paths || []).forEach((item) => pathSteps(item).forEach((step) => codes.add(String(step))));
+  (behavior.transition_rates || behavior.top_transitions || []).map(behaviorCode).forEach((item) => {
+    if (item?.from) codes.add(String(item.from));
+    if (item?.to) codes.add(String(item.to));
+  });
+  (behavior.loop_patterns || []).forEach((item) => item?.from && codes.add(String(item.from)));
+  [...(behavior.entry_events || []), ...(behavior.exit_events || [])].forEach((item) => {
+    if (item?.code) codes.add(String(item.code));
+    if (item?.label) codes.add(String(item.label));
+  });
+  return codes;
+}
+
+function issueMappingCandidates(issue, data) {
+  const source = [issue?.title, issue?.cause_candidate, issue?.recommendation, ...(issue?.evidence || [])].join(" ");
+  const known = knownLogCodes(data);
+  return [...new Set(extractLogCodesFromText(source))].filter((code) => known.has(code)).slice(0, 12);
 }
 
 function durationLabel(seconds) {
@@ -212,6 +296,7 @@ function renderDrawer(data) {
     return;
   }
   const evidence = issue.evidence || [];
+  const mappingCandidates = issueMappingCandidates(issue, data);
   $("#issueDrawer").innerHTML = `
     <div class="drawer-header">
       <span class="badge ${severityClass(issue.severity)}">${escapeHtml(issue.severity || "정보")}</span>
@@ -241,6 +326,19 @@ function renderDrawer(data) {
         }
       </div>
     </div>
+
+    ${
+      mappingCandidates.length
+        ? `
+          <div class="drawer-section quick-map-section">
+            <h3>로그 이름 빠른 지정</h3>
+            <div class="quick-map-chip-list">
+              ${mappingCandidates.map((code) => renderCodeWithAction(code)).join("")}
+            </div>
+          </div>
+        `
+        : ""
+    }
 
     <div class="drawer-metrics">
       <div><span>영향도</span><strong>${percent(issue.impact_score)}</strong></div>
@@ -345,12 +443,12 @@ function pathSteps(item) {
 }
 
 function behaviorItemLabel(item) {
-  return item?.label || item?.code || item?.from || item?.to || "-";
+  return codeLabel(item?.label || item?.code || item?.from || item?.to || "-");
 }
 
 function behaviorPathText(item) {
   const steps = pathSteps(item);
-  return steps.length ? steps.join(" → ") : "-";
+  return steps.length ? steps.map(codeLabel).join(" → ") : "-";
 }
 
 function renderBehaviorFlow(data) {
@@ -402,7 +500,8 @@ function renderBehaviorFlow(data) {
         (step, index) => `
           <div class="flow-step">
             <span>${String(index + 1).padStart(2, "0")}</span>
-            <strong>${escapeHtml(step)}</strong>
+            <strong>${escapeHtml(codeLabel(step))}</strong>
+            ${codeEditButton(step)}
           </div>
         `,
       )
@@ -478,7 +577,7 @@ function renderBehaviorFlow(data) {
         return `
           <div class="flow-transition-row">
             <div>
-              <strong>${escapeHtml(item.from || "-")} → ${escapeHtml(item.to || "-")}</strong>
+              <strong>${renderPathWithActions([item.from || "-", item.to || "-"])}</strong>
               <span>${number(item.from_user_count || item.user_count)}명 중 ${number(item.user_count)}명 · ${number(item.count)}회</span>
             </div>
             <div class="flow-bar" aria-label="전환율 ${percent(rate)}">
@@ -495,7 +594,7 @@ function renderBehaviorFlow(data) {
     .map(
       (item) => `
         <article class="common-path-card">
-          <strong>${escapeHtml(behaviorPathText(item))}</strong>
+          <strong>${renderPathWithActions(pathSteps(item))}</strong>
           <span>${number(item.user_count)}명 · ${percent(item.user_rate)} · ${number(item.occurrence_count)}회</span>
         </article>
       `,
@@ -521,7 +620,7 @@ function renderBehaviorFlow(data) {
         <article class="participation-card">
           <div class="participation-card-head">
             <div>
-              <strong>${escapeHtml(item.label || item.code || "-")}</strong>
+              <strong>${escapeHtml(codeLabel(item.code || item.label || "-"))}</strong>
               <span>${escapeHtml(item.code || "-")}</span>
             </div>
             <em>${percent(item.user_rate)}</em>
@@ -534,6 +633,7 @@ function renderBehaviorFlow(data) {
           <div class="behavior-code-list">
             <span>${escapeHtml(item.event_type || "event")}</span>
             ${item.group ? `<span>${escapeHtml(item.group)}</span>` : ""}
+            ${codeEditButton(item.code || item.label)}
           </div>
         </article>
       `,
@@ -545,7 +645,7 @@ function renderBehaviorFlow(data) {
     .map(
       (item) => `
         <div class="transition-row">
-          <strong>${escapeHtml(item.from || "-")} → ${escapeHtml(item.to || "-")}</strong>
+          <strong>${renderPathWithActions([item.from || "-", item.to || "-"])}</strong>
           <span>${number(item.from_user_count || item.user_count)}명 중 ${number(item.user_count)}명 · 전환율 ${percent(item.transition_rate || item.user_rate)} · ${number(item.count)}회</span>
         </div>
       `,
@@ -557,7 +657,7 @@ function renderBehaviorFlow(data) {
     .map(
       (item) => `
         <div class="transition-row loop">
-          <strong>${escapeHtml(item.from || "-")} 반복</strong>
+          <strong>${renderCodeWithAction(item.from || "-")} 반복</strong>
           <span>${number(item.user_count)}명 · ${number(item.count)}회 · ${percent(item.user_rate)}</span>
         </div>
       `,
@@ -592,7 +692,7 @@ function renderBehaviorFlow(data) {
             .map(
               (item) => `
                 <div>
-                  <strong>${escapeHtml(item.label || item.code || "-")}</strong>
+                  <strong>${renderCodeWithAction(item.code || item.label || "-")}</strong>
                   <span>${number(item.user_count)}명 · ${percent(item.user_rate)}</span>
                 </div>
               `,
@@ -716,6 +816,128 @@ function mappingValue(raw, field, fallback = "") {
   return fallback ?? "";
 }
 
+function activePresetName() {
+  return (
+    languagePresets.find((preset) => preset.id === activePresetId)?.name ||
+    languageConfig?.preset?.name ||
+    activePresetId ||
+    "기본 프리셋"
+  );
+}
+
+function renderPresetControls() {
+  const select = $("#presetSelect");
+  const status = $("#presetStatus");
+  const createButton = $("#createPresetButton");
+  const input = $("#presetNameInput");
+  if (!select) return;
+
+  const presets = languagePresets.length
+    ? languagePresets
+    : [{ id: activePresetId, name: activePresetName(), event_label_count: 0 }];
+
+  select.innerHTML = presets
+    .map(
+      (preset) =>
+        `<option value="${escapeHtml(preset.id)}" ${preset.id === activePresetId ? "selected" : ""}>${escapeHtml(preset.name || preset.id)}</option>`,
+    )
+    .join("");
+  select.disabled = apiUnavailable();
+
+  if (createButton) createButton.disabled = apiUnavailable();
+  if (input) input.disabled = apiUnavailable();
+  if (status) {
+    status.textContent = apiUnavailable()
+      ? "중앙 API 연결 후 프리셋을 저장할 수 있습니다."
+      : `현재 프리셋: ${activePresetName()}`;
+  }
+}
+
+async function loadLanguagePresets() {
+  if (apiUnavailable()) {
+    languagePresets = [{ id: "default", name: "기본 프리셋", event_label_count: 0 }];
+    activePresetId = "default";
+    renderPresetControls();
+    return;
+  }
+  try {
+    const response = await fetch(withQuery(LANGUAGE_PRESETS_URL, { v: Date.now() }));
+    if (!response.ok) throw new Error(`프리셋을 읽을 수 없습니다. HTTP ${response.status}`);
+    const payload = await response.json();
+    languagePresets = payload.presets || [];
+    activePresetId = payload.active_preset_id || activePresetId || "default";
+  } catch {
+    languagePresets = [{ id: activePresetId, name: activePresetName(), event_label_count: 0 }];
+  }
+  renderPresetControls();
+}
+
+async function switchLanguagePreset(presetId) {
+  if (!presetId || apiUnavailable()) return;
+  const status = $("#presetStatus");
+  activePresetId = presetId;
+  renderPresetControls();
+  if (status) status.textContent = "프리셋 전환 중";
+  try {
+    const response = await fetch(LANGUAGE_ACTIVE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preset_id: presetId }),
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.error) {
+      throw new Error(payload.error || `프리셋 전환 실패: HTTP ${response.status}`);
+    }
+    languagePresets = payload.presets || languagePresets;
+    activePresetId = payload.active_preset_id || presetId;
+    await loadLanguageConfig(false);
+    renderLanguageSettings(dashboardData || {});
+    renderDataQuality(dashboardData || {});
+    if (status) status.textContent = `${activePresetName()} 프리셋 사용 중. 다음 분석부터 적용됩니다.`;
+  } catch (error) {
+    if (status) status.textContent = error.message;
+  } finally {
+    renderPresetControls();
+  }
+}
+
+async function createLanguagePreset() {
+  if (apiUnavailable()) return;
+  const input = $("#presetNameInput");
+  const status = $("#presetStatus");
+  const createButton = $("#createPresetButton");
+  const name = input?.value?.trim() || "";
+  if (!name) {
+    if (status) status.textContent = "프리셋 이름을 입력하세요.";
+    return;
+  }
+  if (createButton) createButton.disabled = true;
+  if (status) status.textContent = "프리셋 생성 중";
+  try {
+    const response = await fetch(LANGUAGE_PRESETS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.error) {
+      throw new Error(payload.error || `프리셋 생성 실패: HTTP ${response.status}`);
+    }
+    languagePresets = payload.presets || [];
+    activePresetId = payload.active_preset_id || payload.preset?.id || activePresetId;
+    if (input) input.value = "";
+    await loadLanguageConfig(false);
+    renderLanguageSettings(dashboardData || {});
+    renderDataQuality(dashboardData || {});
+    if (status) status.textContent = `${activePresetName()} 프리셋이 생성되었습니다.`;
+  } catch (error) {
+    if (status) status.textContent = error.message;
+  } finally {
+    if (createButton) createButton.disabled = apiUnavailable();
+    renderPresetControls();
+  }
+}
+
 function renderLanguageSettings(data) {
   const suggestions = data.language?.suggestions || [];
   const configured = languageConfig?.event_labels || {};
@@ -735,6 +957,8 @@ function renderLanguageSettings(data) {
   const saveButton = $("#saveLanguageButton");
   const status = $("#languageSaveStatus");
   if (!container || !saveButton || !status) return;
+
+  renderPresetControls();
 
   if (!rows.length) {
     container.innerHTML = `<p class="empty">설정할 로그 코드가 없습니다.</p>`;
@@ -772,8 +996,10 @@ function renderLanguageSettings(data) {
     })
     .join("");
 
-  saveButton.disabled = IS_GITHUB_PAGES && !API_BASE;
-  status.textContent = saveButton.disabled ? "중앙 API 연결 후 저장할 수 있습니다." : "저장하면 다음 분석부터 적용됩니다.";
+  saveButton.disabled = apiUnavailable();
+  status.textContent = saveButton.disabled
+    ? "중앙 API 연결 후 저장할 수 있습니다."
+    : `${activePresetName()}에 저장하면 다음 분석부터 적용됩니다.`;
   saveButton.onclick = saveLanguageMappings;
 }
 
@@ -791,17 +1017,23 @@ function collectLanguageMappings() {
     .filter((item) => item.raw && item.label);
 }
 
-async function loadLanguageConfig() {
-  if (IS_GITHUB_PAGES && !API_BASE) {
+async function loadLanguageConfig(loadPresets = true) {
+  if (apiUnavailable()) {
     languageConfig = null;
+    await loadLanguagePresets();
     return;
   }
+  if (loadPresets) {
+    await loadLanguagePresets();
+  }
   try {
-    const response = await fetch(`${LANGUAGE_URL}?v=${Date.now()}`);
+    const response = await fetch(withQuery(LANGUAGE_URL, { preset: activePresetId, v: Date.now() }));
     languageConfig = response.ok ? await response.json() : null;
+    activePresetId = languageConfig?.active_preset_id || activePresetId;
   } catch {
     languageConfig = null;
   }
+  renderPresetControls();
 }
 
 async function saveLanguageMappings() {
@@ -818,19 +1050,82 @@ async function saveLanguageMappings() {
     const response = await fetch(LANGUAGE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mappings }),
+      body: JSON.stringify({ preset_id: activePresetId, mappings }),
     });
     const payload = await response.json();
     if (!response.ok || payload.error) {
       throw new Error(payload.error || `저장 실패: HTTP ${response.status}`);
     }
     languageConfig = payload;
+    languagePresets = payload.presets || languagePresets;
+    activePresetId = payload.active_preset_id || activePresetId;
     renderLanguageSettings(dashboardData || {});
-    status.textContent = `${number(payload.updated)}개 저장됨. 같은 파일을 다시 분석하면 반영됩니다.`;
+    status.textContent = `${number(payload.updated)}개 저장됨. ${activePresetName()}으로 다시 분석하면 반영됩니다.`;
   } catch (error) {
     status.textContent = error.message;
   } finally {
-    button.disabled = IS_GITHUB_PAGES && !API_BASE;
+    button.disabled = apiUnavailable();
+  }
+}
+
+function openQuickMapping(rawCode) {
+  const code = String(rawCode || "").trim();
+  if (!code) return;
+  quickMappingCode = code;
+  const configured = languageConfig?.event_labels?.[code] || {};
+  const panel = $("#quickMapPanel");
+  if (!panel) return;
+  $("#quickMapCode").textContent = code;
+  $("#quickMapPreset").textContent = activePresetName();
+  $("#quickMapLabel").value = configured.label || code;
+  $("#quickMapEventType").innerHTML = eventTypeOptions(configured.event_type || "event");
+  $("#quickMapGroup").value = configured.group || "";
+  $("#quickMapStatus").textContent = apiUnavailable()
+    ? "중앙 API 연결 후 저장할 수 있습니다."
+    : "현재 프리셋에 저장됩니다.";
+  $("#quickMapSaveButton").disabled = apiUnavailable();
+  panel.hidden = false;
+  $("#quickMapLabel").focus();
+}
+
+function closeQuickMapping() {
+  quickMappingCode = "";
+  const panel = $("#quickMapPanel");
+  if (panel) panel.hidden = true;
+}
+
+async function saveQuickMapping() {
+  if (!quickMappingCode) return;
+  const button = $("#quickMapSaveButton");
+  const status = $("#quickMapStatus");
+  const mapping = {
+    raw: quickMappingCode,
+    label: $("#quickMapLabel")?.value?.trim() || quickMappingCode,
+    event_type: $("#quickMapEventType")?.value || "event",
+    group: $("#quickMapGroup")?.value?.trim() || "",
+  };
+  button.disabled = true;
+  status.textContent = "저장 중";
+  try {
+    const response = await fetch(LANGUAGE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preset_id: activePresetId, mappings: [mapping] }),
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.error) {
+      throw new Error(payload.error || `저장 실패: HTTP ${response.status}`);
+    }
+    languageConfig = payload;
+    languagePresets = payload.presets || languagePresets;
+    activePresetId = payload.active_preset_id || activePresetId;
+    status.textContent = "저장됨";
+    closeQuickMapping();
+    render(dashboardData || {});
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = apiUnavailable();
   }
 }
 
@@ -988,7 +1283,7 @@ function updateSelectedFiles(files) {
   selectedFiles = [...files];
   const label = $("#fileLabel");
   const button = $("#uploadButton");
-  if (IS_GITHUB_PAGES && !API_BASE) {
+  if (apiUnavailable()) {
     label.textContent = selectedFiles.length ? selectedFiles.map((file) => file.name).join(", ") : "파일 선택 또는 드래그";
     button.disabled = true;
     setRunProgress(0, false);
@@ -1010,7 +1305,7 @@ function updateSelectedFiles(files) {
 
 async function uploadAndRun() {
   if (!selectedFiles.length) return;
-  if (IS_GITHUB_PAGES && !API_BASE) {
+  if (apiUnavailable()) {
     setUploadStatus("중앙 API 서버가 아직 연결되지 않았습니다.", "danger");
     return;
   }
@@ -1023,7 +1318,7 @@ async function uploadAndRun() {
   setRunProgress(0.02, true);
   setUploadStatus("업로드 중 2%");
   try {
-    const response = await fetch(RUN_URL, { method: "POST", body: form });
+    const response = await fetch(withQuery(RUN_URL, { preset: activePresetId }), { method: "POST", body: form });
     const payload = await response.json();
     if (!response.ok || payload.error) {
       throw new Error(payload.error || `분석 실행 실패: HTTP ${response.status}`);
@@ -1068,7 +1363,7 @@ async function loadDashboard() {
     selectedIssueIndex = firstDangerIndex >= 0 ? firstDangerIndex : 0;
     render(data);
   } catch (error) {
-    const hint = IS_GITHUB_PAGES && !API_BASE ? " 중앙 API 서버가 아직 연결되지 않았습니다." : "";
+    const hint = apiUnavailable() ? " 중앙 API 서버가 아직 연결되지 않았습니다." : "";
     $("#boardSummary").innerHTML = `
       <div class="error-box">
         ${escapeHtml(error.message + hint)} 로컬 서버 루트에서 실행 중인지 확인해주세요.
@@ -1110,6 +1405,17 @@ $("#dangerToggle").addEventListener("click", () => {
   renderDrawer(dashboardData);
 });
 $("#downloadButton").addEventListener("click", downloadCurrentReport);
+$("#presetSelect")?.addEventListener("change", (event) => switchLanguagePreset(event.target.value));
+$("#createPresetButton")?.addEventListener("click", createLanguagePreset);
+$("#quickMapCancelButton")?.addEventListener("click", closeQuickMapping);
+$("#quickMapSaveButton")?.addEventListener("click", saveQuickMapping);
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-map-code]");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openQuickMapping(button.dataset.mapCode);
+});
 
 const fileDrop = $("#fileDrop");
 fileDrop.addEventListener("dragover", (event) => {
@@ -1123,7 +1429,7 @@ fileDrop.addEventListener("drop", (event) => {
   updateSelectedFiles(event.dataTransfer.files);
 });
 
-if (IS_GITHUB_PAGES && !API_BASE) {
+if (apiUnavailable()) {
   setUploadStatus("중앙 API 서버가 아직 연결되지 않았습니다.", "danger");
 }
 

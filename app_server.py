@@ -6,7 +6,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
 from threading import Lock, Thread
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 import json
 import os
 import shutil
@@ -53,9 +53,13 @@ RUNS_DIR = DATA_DIR / "runs"
 OUTPUT_DIR, OUTPUT_DIR_SOURCE = resolve_output_dir(DATA_DIR)
 WAREHOUSE_DB = DATA_DIR / "warehouse" / "game.duckdb"
 DEFAULT_DICTIONARY = ROOT / "examples" / "log_language.json"
-DICTIONARY = Path(os.environ.get("APP_DICTIONARY_PATH", DATA_DIR / "config" / "log_language.json")).resolve()
+CONFIG_DIR = DATA_DIR / "config"
+DICTIONARY = Path(os.environ.get("APP_DICTIONARY_PATH", CONFIG_DIR / "log_language.json")).resolve()
+PRESETS_DIR = Path(os.environ.get("APP_PRESETS_DIR", CONFIG_DIR / "presets")).resolve()
+ACTIVE_PRESET = Path(os.environ.get("APP_ACTIVE_PRESET_PATH", CONFIG_DIR / "active_preset.json")).resolve()
+DEFAULT_PRESET_ID = "default"
 LATEST_RUN = OUTPUT_DIR / "latest_run.json"
-JOB_QUEUE: Queue[tuple[str, list[Path], dict[str, str]]] = Queue()
+JOB_QUEUE: Queue[tuple[str, list[Path], dict[str, str], str]] = Queue()
 WORKER_LOCK = Lock()
 JSON_LOCK = Lock()
 WORKER_STARTED = False
@@ -176,38 +180,168 @@ def storage_health(env: Mapping[str, str] = os.environ) -> dict[str, object]:
         "output_dir_source": OUTPUT_DIR_SOURCE,
         "warehouse_db": display_path(WAREHOUSE_DB),
         "dictionary": display_path(DICTIONARY),
+        "presets_dir": display_path(PRESETS_DIR),
+        "active_preset": read_active_preset_id(),
         "railway_runtime": railway_runtime,
         "railway_volume_mounted": railway_volume_mounted,
         "persistence": persistence,
     }
 
 
-def build_storage(run_id: str) -> dict[str, str]:
-    run_dir = RUNS_DIR / run_id
-    processed_dir = run_dir / "processed"
+def normalize_preset_id(value: object | None) -> str:
+    text = str(value or "").strip().lower()
+    chars: list[str] = []
+    previous_dash = False
+    for char in text[:80]:
+        if char.isalnum() or char in {"_", "-"}:
+            chars.append(char)
+            previous_dash = False
+        elif char.isspace() and not previous_dash:
+            chars.append("-")
+            previous_dash = True
+    preset_id = "".join(chars).strip("-_")
+    return preset_id or DEFAULT_PRESET_ID
+
+
+def preset_dictionary_path(preset_id: str) -> Path:
+    normalized = normalize_preset_id(preset_id)
+    if normalized == DEFAULT_PRESET_ID:
+        return DICTIONARY
+    return PRESETS_DIR / f"{normalized}.json"
+
+
+def read_active_preset_id(active_path: Path | None = None) -> str:
+    active_path = active_path or ACTIVE_PRESET
+    if active_path.exists():
+        try:
+            return normalize_preset_id(read_json(active_path).get("preset_id"))
+        except (OSError, json.JSONDecodeError):
+            return DEFAULT_PRESET_ID
+    return DEFAULT_PRESET_ID
+
+
+def write_active_preset_id(preset_id: str, active_path: Path | None = None) -> str:
+    active_path = active_path or ACTIVE_PRESET
+    normalized = normalize_preset_id(preset_id)
+    write_json(active_path, {"preset_id": normalized, "updated_at": now_stamp()})
+    return normalized
+
+
+def preset_display_name(preset_id: str, data: Mapping[str, object] | None = None) -> str:
+    preset = data.get("preset", {}) if isinstance(data, Mapping) else {}
+    if isinstance(preset, Mapping):
+        name = str(preset.get("name") or "").strip()
+        if name:
+            return name
+    return "기본 프리셋" if preset_id == DEFAULT_PRESET_ID else preset_id
+
+
+def ensure_dictionary(preset_id: str | None = None) -> Path:
+    normalized = normalize_preset_id(preset_id or read_active_preset_id())
+    target = preset_dictionary_path(normalized)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        if DEFAULT_DICTIONARY.exists():
+            shutil.copyfile(DEFAULT_DICTIONARY, target)
+        else:
+            write_json(
+                target,
+                {
+                    "timezone": "Asia/Seoul",
+                    "session_gap_minutes": 30,
+                    "fields": {},
+                    "event_labels": {},
+                    "content_labels": {},
+                    "product_labels": {},
+                },
+            )
+
+    data = read_json(target)
+    changed = False
+    for key, value in {
+        "timezone": "Asia/Seoul",
+        "session_gap_minutes": 30,
+        "fields": {},
+        "event_labels": {},
+        "content_labels": {},
+        "product_labels": {},
+    }.items():
+        if key not in data:
+            data[key] = value
+            changed = True
+    preset = data.setdefault("preset", {})
+    if not isinstance(preset, dict):
+        data["preset"] = {}
+        preset = data["preset"]
+        changed = True
+    if preset.get("id") != normalized:
+        preset["id"] = normalized
+        changed = True
+    if not preset.get("name"):
+        preset["name"] = "기본 프리셋" if normalized == DEFAULT_PRESET_ID else normalized
+        changed = True
+    if changed:
+        write_json(target, data)
+    return target
+
+
+def language_preset_summary(preset_id: str, dictionary_path: Path | None = None) -> dict[str, object]:
+    normalized = normalize_preset_id(preset_id)
+    path = dictionary_path or ensure_dictionary(normalized)
+    data = read_json(path)
     return {
-        "run_id": run_id,
-        "run_dir": display_path(run_dir),
-        "raw_dir": display_path(run_dir / "raw"),
-        "processed_dir": display_path(processed_dir),
-        "analysis_json": display_path(processed_dir / "analysis.json"),
-        "normalized_events": display_path(processed_dir / "normalized_events.csv"),
-        "warehouse_db": display_path(WAREHOUSE_DB),
-        "dictionary": display_path(DICTIONARY),
-        "latest_analysis_json": display_path(OUTPUT_DIR / "analysis.json"),
-        "latest_normalized_events": display_path(OUTPUT_DIR / "normalized_events.csv"),
+        "id": normalized,
+        "name": preset_display_name(normalized, data),
+        "dictionary": display_path(path),
+        "event_label_count": len(data.get("event_labels", {})),
     }
 
 
-def ensure_dictionary() -> Path:
-    if DICTIONARY.exists():
-        return DICTIONARY
-    DICTIONARY.parent.mkdir(parents=True, exist_ok=True)
+def list_language_presets(
+    presets_dir: Path | None = None,
+    active_path: Path | None = None,
+) -> dict[str, object]:
+    presets_dir = presets_dir or PRESETS_DIR
+    active_path = active_path or ACTIVE_PRESET
+    active = read_active_preset_id(active_path)
+    default_path = ensure_dictionary(DEFAULT_PRESET_ID)
+    rows = [language_preset_summary(DEFAULT_PRESET_ID, default_path)]
+    if presets_dir.exists():
+        for path in sorted(presets_dir.glob("*.json")):
+            preset_id = normalize_preset_id(path.stem)
+            if preset_id == DEFAULT_PRESET_ID:
+                continue
+            rows.append(language_preset_summary(preset_id, ensure_dictionary(preset_id)))
+    for row in rows:
+        row["active"] = row["id"] == active
+    return {"active_preset_id": active, "presets": rows}
+
+
+def create_language_preset(
+    name: str,
+    preset_id: str | None = None,
+    presets_dir: Path | None = None,
+    active_path: Path | None = None,
+) -> dict[str, object]:
+    presets_dir = presets_dir or PRESETS_DIR
+    active_path = active_path or ACTIVE_PRESET
+    display_name = clean_mapping_text(name, 120) or "새 프리셋"
+    base = normalize_preset_id(preset_id or display_name)
+    candidate = base
+    counter = 2
+    while preset_dictionary_path(candidate).exists() and candidate != DEFAULT_PRESET_ID:
+        candidate = normalize_preset_id(f"{base}-{counter}")
+        counter += 1
+    path = preset_dictionary_path(candidate)
+    if candidate == DEFAULT_PRESET_ID and path.exists():
+        candidate = normalize_preset_id(f"preset-{uuid.uuid4().hex[:6]}")
+        path = preset_dictionary_path(candidate)
+    path.parent.mkdir(parents=True, exist_ok=True)
     if DEFAULT_DICTIONARY.exists():
-        shutil.copyfile(DEFAULT_DICTIONARY, DICTIONARY)
+        shutil.copyfile(DEFAULT_DICTIONARY, path)
     else:
         write_json(
-            DICTIONARY,
+            path,
             {
                 "timezone": "Asia/Seoul",
                 "session_gap_minutes": 30,
@@ -217,7 +351,39 @@ def ensure_dictionary() -> Path:
                 "product_labels": {},
             },
         )
-    return DICTIONARY
+    data = read_json(path)
+    data["preset"] = {"id": candidate, "name": display_name}
+    data.setdefault("event_labels", {})
+    data["updated_at"] = now_stamp()
+    write_json(path, data)
+    write_active_preset_id(candidate, active_path)
+    return {
+        "status": "ok",
+        "active_preset_id": candidate,
+        "preset": language_preset_summary(candidate, path),
+        **list_language_presets(presets_dir, active_path),
+    }
+
+
+def build_storage(run_id: str, preset_id: str | None = None) -> dict[str, str]:
+    normalized_preset = normalize_preset_id(preset_id or read_active_preset_id())
+    dictionary_path = ensure_dictionary(normalized_preset)
+    run_dir = RUNS_DIR / run_id
+    processed_dir = run_dir / "processed"
+    return {
+        "run_id": run_id,
+        "language_preset_id": normalized_preset,
+        "language_preset_name": str(language_preset_summary(normalized_preset, dictionary_path)["name"]),
+        "run_dir": display_path(run_dir),
+        "raw_dir": display_path(run_dir / "raw"),
+        "processed_dir": display_path(processed_dir),
+        "analysis_json": display_path(processed_dir / "analysis.json"),
+        "normalized_events": display_path(processed_dir / "normalized_events.csv"),
+        "warehouse_db": display_path(WAREHOUSE_DB),
+        "dictionary": display_path(dictionary_path),
+        "latest_analysis_json": display_path(OUTPUT_DIR / "analysis.json"),
+        "latest_normalized_events": display_path(OUTPUT_DIR / "normalized_events.csv"),
+    }
 
 
 def clean_mapping_text(value: object, max_length: int) -> str:
@@ -245,14 +411,20 @@ def normalize_language_mapping(mapping: Mapping[str, object]) -> tuple[str, dict
 def update_language_dictionary(
     mappings: list[Mapping[str, object]],
     dictionary_path: Path | None = None,
+    preset_id: str | None = None,
 ) -> dict[str, object]:
-    target = dictionary_path or ensure_dictionary()
+    normalized_preset = normalize_preset_id(preset_id or read_active_preset_id())
+    target = dictionary_path or ensure_dictionary(normalized_preset)
     target.parent.mkdir(parents=True, exist_ok=True)
     with JSON_LOCK:
         data = read_json(target) if target.exists() else {}
         data.setdefault("timezone", "Asia/Seoul")
         data.setdefault("session_gap_minutes", 30)
         data.setdefault("fields", {})
+        data["preset"] = {
+            "id": normalized_preset,
+            "name": preset_display_name(normalized_preset, data),
+        }
         event_labels = data.setdefault("event_labels", {})
         changed: list[str] = []
         for mapping in mappings:
@@ -268,6 +440,8 @@ def update_language_dictionary(
         "updated": len(changed),
         "codes": changed,
         "dictionary": display_path(target),
+        "active_preset_id": normalized_preset,
+        "preset": language_preset_summary(normalized_preset, target),
         "event_labels": data.get("event_labels", {}),
     }
 
@@ -302,14 +476,14 @@ def ensure_worker() -> None:
 
 def worker_loop() -> None:
     while True:
-        run_id, saved, storage = JOB_QUEUE.get()
+        run_id, saved, storage, preset_id = JOB_QUEUE.get()
         try:
-            run_analysis_job(run_id, saved, storage)
+            run_analysis_job(run_id, saved, storage, preset_id)
         finally:
             JOB_QUEUE.task_done()
 
 
-def run_analysis_job(run_id: str, saved: list[Path], storage: dict[str, str]) -> None:
+def run_analysis_job(run_id: str, saved: list[Path], storage: dict[str, str], preset_id: str) -> None:
     processed_dir = RUNS_DIR / run_id / "processed"
     processed_analysis = processed_dir / "analysis.json"
     processed_normalized = processed_dir / "normalized_events.csv"
@@ -333,7 +507,7 @@ def run_analysis_job(run_id: str, saved: list[Path], storage: dict[str, str]) ->
             progress=0.06,
             message="분석 준비 중",
         )
-        dictionary_path = ensure_dictionary()
+        dictionary_path = ensure_dictionary(preset_id)
         result = run_pipeline(
             inputs=saved,
             dictionary_path=dictionary_path,
@@ -345,6 +519,7 @@ def run_analysis_job(run_id: str, saved: list[Path], storage: dict[str, str]) ->
         )
         result["uploaded_files"] = [path.name for path in saved]
         result["storage"] = storage
+        result["language_preset"] = language_preset_summary(preset_id, dictionary_path)
 
         write_json(processed_analysis, result)
         shutil.copyfile(processed_analysis, latest_analysis)
@@ -359,6 +534,7 @@ def run_analysis_job(run_id: str, saved: list[Path], storage: dict[str, str]) ->
             message="적용 완료",
             summary=result.get("summary", {}),
             analysis_json=storage["analysis_json"],
+            language_preset=result["language_preset"],
         )
         write_latest_run(status)
     except Exception as exc:
@@ -420,8 +596,16 @@ class AppHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             if parsed.path == "/api/run":
-                payload = self._handle_run()
+                payload = self._handle_run(parsed)
                 self._send_json(payload, status=202)
+                return
+            if parsed.path == "/api/language/presets":
+                payload = self._handle_preset_create()
+                self._send_json(payload)
+                return
+            if parsed.path == "/api/language/active":
+                payload = self._handle_preset_switch()
+                self._send_json(payload)
                 return
             if parsed.path == "/api/language":
                 payload = self._handle_language_save()
@@ -445,10 +629,17 @@ class AppHandler(SimpleHTTPRequestHandler):
                 }
             )
             return
+        if parsed.path == "/api/language/presets":
+            self._send_json(list_language_presets())
+            return
         if parsed.path == "/api/language":
-            path = ensure_dictionary()
+            query = parse_qs(parsed.query)
+            preset_id = normalize_preset_id((query.get("preset") or [""])[0] or read_active_preset_id())
+            path = ensure_dictionary(preset_id)
             payload = read_json(path)
             payload["dictionary"] = display_path(path)
+            payload["active_preset_id"] = preset_id
+            payload["preset"] = language_preset_summary(preset_id, path)
             payload["event_type_options"] = sorted(ALLOWED_EVENT_TYPES)
             self._send_json(payload)
             return
@@ -502,12 +693,35 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def _handle_language_save(self) -> dict:
         payload = self._read_json_body()
+        preset_id = normalize_preset_id(payload.get("preset_id") or read_active_preset_id())
+        write_active_preset_id(preset_id)
         mappings = payload.get("mappings")
         if isinstance(mappings, dict):
             mappings = [{"raw": raw, **entry} for raw, entry in mappings.items() if isinstance(entry, dict)]
         if not isinstance(mappings, list):
             raise ValueError("mappings must be a list.")
-        return update_language_dictionary([item for item in mappings if isinstance(item, dict)])
+        result = update_language_dictionary([item for item in mappings if isinstance(item, dict)], preset_id=preset_id)
+        result.update(list_language_presets())
+        return result
+
+    def _handle_preset_create(self) -> dict:
+        payload = self._read_json_body()
+        return create_language_preset(
+            name=str(payload.get("name") or payload.get("preset_name") or ""),
+            preset_id=str(payload.get("preset_id") or "") or None,
+        )
+
+    def _handle_preset_switch(self) -> dict:
+        payload = self._read_json_body()
+        preset_id = normalize_preset_id(payload.get("preset_id"))
+        ensure_dictionary(preset_id)
+        write_active_preset_id(preset_id)
+        return {
+            "status": "ok",
+            "active_preset_id": preset_id,
+            "preset": language_preset_summary(preset_id),
+            **list_language_presets(),
+        }
 
     def _read_part_until_boundary(self, boundary: bytes, handle: object | None = None) -> bytes:
         previous: bytes | None = None
@@ -571,8 +785,11 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         return saved
 
-    def _handle_run(self) -> dict:
+    def _handle_run(self, parsed: object) -> dict:
         content_type = self.headers.get("content-type", "")
+        query = parse_qs(getattr(parsed, "query", ""))
+        preset_id = normalize_preset_id((query.get("preset") or [""])[0] or read_active_preset_id())
+        dictionary_path = ensure_dictionary(preset_id)
 
         run_id = make_run_id()
         run_dir = RUNS_DIR / run_id
@@ -588,7 +805,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         if not saved:
             raise ValueError("No files were uploaded.")
 
-        storage = build_storage(run_id)
+        storage = build_storage(run_id, preset_id)
         status = {
             "run_id": run_id,
             "status": "queued",
@@ -601,10 +818,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             "uploaded_files": [path.name for path in saved],
             "input_bytes": sum(path.stat().st_size for path in saved),
             "storage": storage,
+            "language_preset": language_preset_summary(preset_id, dictionary_path),
         }
         write_json(status_path(run_id), status)
         write_latest_run(status)
-        JOB_QUEUE.put((run_id, saved, storage))
+        JOB_QUEUE.put((run_id, saved, storage, preset_id))
         ensure_worker()
         return status
 

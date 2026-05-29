@@ -8,6 +8,7 @@ __pycache__/
 output/
 logs/
 data/uploads/
+data/config/
 data/runs/
 data/warehouse/
 data/staging/

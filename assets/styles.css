@@ -2692,6 +2692,42 @@ select {
   background: #7132f5;
 }
 
+.code-with-action {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inline-arrow {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 6px;
+  color: #7132f5;
+  font-weight: 850;
+}
+
+.quick-map-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 3px 7px;
+  border: 1px solid rgba(113, 50, 245, 0.18);
+  border-radius: 8px;
+  background: rgba(133, 91, 251, 0.16);
+  color: #7132f5;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 820;
+  line-height: 1;
+}
+
+.quick-map-button:hover {
+  border-color: #7132f5;
+  background: rgba(133, 91, 251, 0.22);
+}
+
 .behavior-signal-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -3171,6 +3207,52 @@ select {
   padding-right: 3px;
 }
 
+.preset-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(220px, 0.8fr);
+  gap: 9px;
+  align-items: end;
+  margin-top: 14px;
+  padding: 11px;
+  border: 1px solid rgba(113, 50, 245, 0.16);
+  border-radius: 12px;
+  background: rgba(133, 91, 251, 0.08);
+}
+
+.preset-toolbar label {
+  display: grid;
+  gap: 5px;
+}
+
+.preset-toolbar label span,
+.preset-toolbar > span {
+  color: #686b82;
+  font-size: 11px;
+  font-weight: 720;
+}
+
+.preset-toolbar input {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid rgba(104, 107, 130, 0.2);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #101114;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.preset-toolbar input:focus {
+  border-color: #7132f5;
+  box-shadow: 0 0 0 3px rgba(113, 50, 245, 0.12);
+  outline: none;
+}
+
+.preset-toolbar .button {
+  min-height: 38px;
+}
+
 .mapping-row {
   display: grid;
   grid-template-columns: minmax(120px, 0.7fr) minmax(170px, 1.1fr) minmax(140px, 0.8fr) minmax(150px, 0.9fr);
@@ -3242,6 +3324,117 @@ select {
   min-height: 38px;
 }
 
+.quick-map-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quick-map-chip-list .code-with-action {
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid rgba(104, 107, 130, 0.14);
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.quick-map-panel {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 30;
+  display: grid;
+  width: min(360px, calc(100vw - 28px));
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(113, 50, 245, 0.24);
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 18px 42px rgba(16, 17, 20, 0.16);
+}
+
+.quick-map-panel[hidden] {
+  display: none !important;
+}
+
+.quick-map-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quick-map-head span,
+.quick-map-panel label span,
+.quick-map-panel p,
+.quick-map-actions span {
+  color: #686b82;
+  font-size: 11px;
+  font-weight: 720;
+}
+
+.quick-map-head strong {
+  display: block;
+  margin-top: 4px;
+  color: #101114;
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 15px;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(104, 107, 130, 0.16);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #686b82;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 760;
+}
+
+.quick-map-panel p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.quick-map-panel p strong {
+  color: #5741d8;
+}
+
+.quick-map-panel label {
+  display: grid;
+  gap: 5px;
+}
+
+.quick-map-panel input,
+.quick-map-panel select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid rgba(104, 107, 130, 0.2);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #101114;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.quick-map-panel input:focus,
+.quick-map-panel select:focus {
+  border-color: #7132f5;
+  box-shadow: 0 0 0 3px rgba(113, 50, 245, 0.12);
+  outline: none;
+}
+
+.quick-map-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 @media (max-width: 1180px) {
   .mapping-row {
     grid-template-columns: 1fr 1fr;
@@ -3250,6 +3443,7 @@ select {
 
 @media (max-width: 760px) {
   .mapping-row,
+  .preset-toolbar,
   .language-actions {
     grid-template-columns: 1fr;
   }

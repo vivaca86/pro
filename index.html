@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Game Data Decision Board</title>
-    <link rel="stylesheet" href="./assets/styles.css?v=board-20260529-9" />
+    <link rel="stylesheet" href="./assets/styles.css?v=board-20260530-2" />
   </head>
   <body>
     <div class="app-shell board-shell">
@@ -42,9 +42,9 @@
           </div>
           <div class="topbar-actions">
             <label>
-              프로젝트
-              <select aria-label="프로젝트 선택">
-                <option>Dragon Realm</option>
+              프리셋
+              <select id="presetSelect" aria-label="로그 프리셋 선택">
+                <option>기본 프리셋</option>
               </select>
             </label>
             <label>
@@ -182,6 +182,14 @@
               </div>
             </div>
             <div id="languageStatus" class="quality-list"></div>
+            <div class="preset-toolbar">
+              <label>
+                <span>새 프리셋</span>
+                <input id="presetNameInput" type="text" placeholder="게임명 또는 서버명" />
+              </label>
+              <button class="button ghost" id="createPresetButton" type="button">프리셋 추가</button>
+              <span id="presetStatus">프리셋을 불러오는 중입니다.</span>
+            </div>
             <div id="languageMappings" class="language-mappings"></div>
             <div class="language-actions">
               <button class="button primary" id="saveLanguageButton" type="button" disabled>매핑 저장</button>
@@ -192,7 +200,34 @@
       </main>
     </div>
 
-    <script src="./assets/api-config.js?v=board-20260529-9"></script>
-    <script src="./assets/dashboard.js?v=board-20260529-9"></script>
+    <aside class="quick-map-panel" id="quickMapPanel" hidden>
+      <div class="quick-map-head">
+        <div>
+          <span>빠른 로그 이름 지정</span>
+          <strong id="quickMapCode">-</strong>
+        </div>
+        <button class="icon-button" id="quickMapCancelButton" type="button" aria-label="닫기">×</button>
+      </div>
+      <p>현재 프리셋 <strong id="quickMapPreset">기본 프리셋</strong>에 저장됩니다.</p>
+      <label>
+        <span>이름</span>
+        <input id="quickMapLabel" type="text" placeholder="예: 던전 입장" />
+      </label>
+      <label>
+        <span>유형</span>
+        <select id="quickMapEventType"></select>
+      </label>
+      <label>
+        <span>그룹</span>
+        <input id="quickMapGroup" type="text" placeholder="예: 던전, 상점, 튜토리얼" />
+      </label>
+      <div class="quick-map-actions">
+        <button class="button primary" id="quickMapSaveButton" type="button">저장</button>
+        <span id="quickMapStatus">대기 중</span>
+      </div>
+    </aside>
+
+    <script src="./assets/api-config.js?v=board-20260530-2"></script>
+    <script src="./assets/dashboard.js?v=board-20260530-2"></script>
   </body>
 </html>
