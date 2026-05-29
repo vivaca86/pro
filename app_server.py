@@ -8,6 +8,7 @@ from threading import Lock, Thread
 from urllib.parse import unquote, urlparse
 import cgi
 import json
+import os
 import shutil
 import socket
 import time
@@ -28,6 +29,14 @@ JOB_QUEUE: Queue[tuple[str, list[Path], dict[str, str]]] = Queue()
 WORKER_LOCK = Lock()
 JSON_LOCK = Lock()
 WORKER_STARTED = False
+DEFAULT_ALLOWED_ORIGINS = {"https://vivaca86.github.io"}
+
+
+def allowed_origins() -> set[str]:
+    configured = os.environ.get("APP_ALLOWED_ORIGINS", "")
+    if configured:
+        return {origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()}
+    return DEFAULT_ALLOWED_ORIGINS
 
 
 def now_stamp() -> str:
@@ -196,7 +205,22 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("Cache-Control", "no-store")
+        origin = self.headers.get("Origin")
+        origins = allowed_origins()
+        if origin and ("*" in origins or origin.rstrip("/") in origins):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         super().end_headers()
+
+    def do_OPTIONS(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/") or parsed.path.startswith("/output/"):
+            self.send_response(204)
+            self.end_headers()
+            return
+        self.send_error(404, "Not found")
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)

@@ -1,6 +1,24 @@
-const DATA_URL = "./output/analysis.json";
-const RUN_URL = "./api/run";
-const RUNS_URL = "./api/runs";
+const API_BASE_STORAGE_KEY = "gameDataApiBase";
+const IS_GITHUB_PAGES = location.hostname.endsWith("github.io");
+
+function normalizeApiBase(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function resolveApiBase() {
+  const params = new URLSearchParams(location.search);
+  const urlApiBase = normalizeApiBase(params.get("api"));
+  if (urlApiBase) {
+    localStorage.setItem(API_BASE_STORAGE_KEY, urlApiBase);
+    return urlApiBase;
+  }
+  return normalizeApiBase(localStorage.getItem(API_BASE_STORAGE_KEY));
+}
+
+const API_BASE = resolveApiBase();
+const DATA_URL = API_BASE ? `${API_BASE}/output/analysis.json` : "./output/analysis.json";
+const RUN_URL = API_BASE ? `${API_BASE}/api/run` : "./api/run";
+const RUNS_URL = API_BASE ? `${API_BASE}/api/runs` : "./api/runs";
 
 let dashboardData = null;
 let selectedIssueIndex = 0;
@@ -420,6 +438,13 @@ function updateSelectedFiles(files) {
   selectedFiles = [...files];
   const label = $("#fileLabel");
   const button = $("#uploadButton");
+  if (IS_GITHUB_PAGES && !API_BASE) {
+    label.textContent = selectedFiles.length ? selectedFiles.map((file) => file.name).join(", ") : "파일 선택 또는 드래그";
+    button.disabled = true;
+    setRunProgress(0, false);
+    setUploadStatus("API 서버 주소가 필요합니다. URL에 ?api=https://분석서버주소 를 붙여주세요.", "danger");
+    return;
+  }
   if (!selectedFiles.length) {
     label.textContent = "파일 선택 또는 드래그";
     button.disabled = true;
@@ -435,6 +460,10 @@ function updateSelectedFiles(files) {
 
 async function uploadAndRun() {
   if (!selectedFiles.length) return;
+  if (IS_GITHUB_PAGES && !API_BASE) {
+    setUploadStatus("API 서버 주소가 필요합니다. URL에 ?api=https://분석서버주소 를 붙여주세요.", "danger");
+    return;
+  }
   const button = $("#uploadButton");
   const form = new FormData();
   selectedFiles.forEach((file) => form.append("files", file));
@@ -471,16 +500,29 @@ async function uploadAndRun() {
 
 async function loadDashboard() {
   try {
-    const response = await fetch(`${DATA_URL}?v=${Date.now()}`);
-    if (!response.ok) throw new Error(`analysis.json을 읽을 수 없습니다. HTTP ${response.status}`);
-    const data = await response.json();
+    let data;
+    if (API_BASE) {
+      const latest = await fetch(`${RUNS_URL}/latest?v=${Date.now()}`);
+      if (latest.ok) {
+        const latestPayload = await latest.json();
+        data = latestPayload.run_id ? await loadRunAnalysis(latestPayload.run_id) : latestPayload;
+      }
+    }
+    if (!data) {
+      const response = await fetch(`${DATA_URL}?v=${Date.now()}`);
+      if (!response.ok) throw new Error(`analysis.json을 읽을 수 없습니다. HTTP ${response.status}`);
+      data = await response.json();
+    }
     const firstDangerIndex = visibleIssues(data).findIndex((issue) => issue.severity === "위험");
     selectedIssueIndex = firstDangerIndex >= 0 ? firstDangerIndex : 0;
     render(data);
   } catch (error) {
+    const hint = IS_GITHUB_PAGES && !API_BASE
+      ? " GitHub Pages에서는 URL에 ?api=https://분석서버주소 를 붙여야 업로드/분석이 동작합니다."
+      : "";
     $("#boardSummary").innerHTML = `
       <div class="error-box">
-        ${escapeHtml(error.message)} 로컬 서버 루트에서 실행 중인지 확인해주세요.
+        ${escapeHtml(error.message + hint)} 로컬 서버 루트에서 실행 중인지 확인해주세요.
       </div>
     `;
   }
@@ -531,5 +573,9 @@ fileDrop.addEventListener("drop", (event) => {
   fileDrop.classList.remove("dragging");
   updateSelectedFiles(event.dataTransfer.files);
 });
+
+if (IS_GITHUB_PAGES && !API_BASE) {
+  setUploadStatus("API 서버 주소가 필요합니다. URL에 ?api=https://분석서버주소 를 붙여주세요.", "danger");
+}
 
 loadDashboard();
