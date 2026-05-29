@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 output/
+logs/
 data/uploads/
 data/runs/
 data/warehouse/

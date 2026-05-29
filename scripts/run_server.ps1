@@ -5,7 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Python = "python"
 
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
@@ -19,8 +19,14 @@ if ($env:PYTHONPATH) {
     $PythonPathParts += $env:PYTHONPATH
 }
 $env:PYTHONPATH = ($PythonPathParts -join ";")
+if (-not $env:APP_DATA_DIR) {
+    $env:APP_DATA_DIR = Join-Path $Root "data"
+}
+if (-not $env:APP_OUTPUT_DIR) {
+    $env:APP_OUTPUT_DIR = Join-Path $Root "data\output"
+}
 
-Set-Location $Root
+Set-Location -LiteralPath $Root
 if ($AllowLan) {
     & $Python (Join-Path $Root "app_server.py") $Port --allow-lan
 } else {

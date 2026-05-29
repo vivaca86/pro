@@ -11,6 +11,14 @@ Use this when the dashboard should run on a Windows PC without a central server.
 
 The first run creates `.venv` and installs Python dependencies. Later runs reuse that environment.
 
+If startup fails, send the newest files from:
+
+```text
+logs/
+```
+
+The setup log and server stderr log explain whether Python, dependency install, port binding, or the app server failed.
+
 ## Data
 
 Local analysis data is stored inside:

@@ -10,6 +10,35 @@ $VenvDir = Join-Path $Root ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $Requirements = Join-Path $Root "requirements.txt"
 $RequirementsHash = Join-Path $VenvDir ".requirements.sha256"
+$LogDir = Join-Path $Root "logs"
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+$SetupLog = Join-Path $LogDir ("setup-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+$TranscriptStarted = $false
+
+try {
+    Start-Transcript -Path $SetupLog -Append | Out-Null
+    $TranscriptStarted = $true
+} catch {
+    $TranscriptStarted = $false
+}
+
+trap {
+    Write-Host ""
+    Write-Host "Local dashboard setup failed:"
+    Write-Host $_.Exception.Message
+    Write-Host ""
+    Write-Host "Setup log:"
+    Write-Host $SetupLog
+    if (Test-Path $SetupLog) {
+        Write-Host ""
+        Write-Host "Last setup log lines:"
+        Get-Content -LiteralPath $SetupLog -Tail 40
+    }
+    if ($TranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch {}
+    }
+    exit 1
+}
 
 function Write-Step {
     param([string]$Message)
@@ -138,9 +167,9 @@ $env:APP_OUTPUT_DIR = Join-Path $Root "data\output"
 
 Write-Step "Starting local dashboard server"
 if ($AllowLan) {
-    & (Join-Path $PSScriptRoot "start_server.ps1") -Port $Port -HostAddress "127.0.0.1" -AllowLan
+    & (Join-Path $PSScriptRoot "start_server.ps1") -Port $Port -HostAddress "127.0.0.1" -AllowLan -LogDir $LogDir
 } else {
-    & (Join-Path $PSScriptRoot "start_server.ps1") -Port $Port -HostAddress "127.0.0.1"
+    & (Join-Path $PSScriptRoot "start_server.ps1") -Port $Port -HostAddress "127.0.0.1" -LogDir $LogDir
 }
 if ($LASTEXITCODE -ne 0) {
     throw "Local server failed to start."
@@ -159,3 +188,10 @@ Write-Host $url
 Write-Host ""
 Write-Host "To stop it later, run:"
 Write-Host "powershell -ExecutionPolicy Bypass -File scripts\stop_server.ps1 -Port $Port"
+Write-Host ""
+Write-Host "Logs are stored in:"
+Write-Host $LogDir
+
+if ($TranscriptStarted) {
+    try { Stop-Transcript | Out-Null } catch {}
+}
