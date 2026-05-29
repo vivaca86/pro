@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import ArgumentParser
+from collections.abc import Mapping
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
@@ -19,10 +20,38 @@ from game_data_engine.warehouse import fetch_run_snapshot
 
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("APP_DATA_DIR", ROOT / "data")).resolve()
+
+
+def resolve_data_dir(env: Mapping[str, str] = os.environ) -> tuple[Path, str]:
+    railway_volume = env.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if railway_volume:
+        return Path(railway_volume).resolve(), "railway_volume"
+
+    configured = env.get("APP_DATA_DIR", "").strip()
+    if configured:
+        return Path(configured).resolve(), "APP_DATA_DIR"
+
+    default = env.get("APP_DEFAULT_DATA_DIR", "").strip()
+    if default:
+        return Path(default).resolve(), "APP_DEFAULT_DATA_DIR"
+
+    return (ROOT / "data").resolve(), "default"
+
+
+def resolve_output_dir(
+    data_dir: Path,
+    env: Mapping[str, str] = os.environ,
+) -> tuple[Path, str]:
+    configured = env.get("APP_OUTPUT_DIR", "").strip()
+    if configured:
+        return Path(configured).resolve(), "APP_OUTPUT_DIR"
+    return (data_dir / "output").resolve(), "data_dir"
+
+
+DATA_DIR, DATA_DIR_SOURCE = resolve_data_dir()
 UPLOAD_DIR = DATA_DIR / "uploads"
 RUNS_DIR = DATA_DIR / "runs"
-OUTPUT_DIR = Path(os.environ.get("APP_OUTPUT_DIR", DATA_DIR / "output")).resolve()
+OUTPUT_DIR, OUTPUT_DIR_SOURCE = resolve_output_dir(DATA_DIR)
 WAREHOUSE_DB = DATA_DIR / "warehouse" / "game.duckdb"
 DICTIONARY = ROOT / "examples" / "log_language.json"
 LATEST_RUN = OUTPUT_DIR / "latest_run.json"
@@ -77,6 +106,32 @@ def display_path(path: Path) -> str:
         except ValueError:
             pass
     return str(resolved)
+
+
+def is_railway_runtime(env: Mapping[str, str] = os.environ) -> bool:
+    return any(env.get(name) for name in ("RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID", "RAILWAY_PROJECT_ID"))
+
+
+def storage_health(env: Mapping[str, str] = os.environ) -> dict[str, object]:
+    railway_volume_mounted = bool(env.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip())
+    railway_runtime = is_railway_runtime(env)
+    if railway_volume_mounted:
+        persistence = "railway_volume"
+    elif railway_runtime:
+        persistence = "railway_ephemeral"
+    else:
+        persistence = "local_disk"
+
+    return {
+        "data_dir": display_path(DATA_DIR),
+        "data_dir_source": DATA_DIR_SOURCE,
+        "output_dir": display_path(OUTPUT_DIR),
+        "output_dir_source": OUTPUT_DIR_SOURCE,
+        "warehouse_db": display_path(WAREHOUSE_DB),
+        "railway_runtime": railway_runtime,
+        "railway_volume_mounted": railway_volume_mounted,
+        "persistence": persistence,
+    }
 
 
 def build_storage(run_id: str) -> dict[str, str]:
@@ -253,11 +308,13 @@ class AppHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         parts = [part for part in parsed.path.strip("/").split("/") if part]
         if parsed.path == "/api/health":
+            storage = storage_health()
             self._send_json(
                 {
                     "status": "ok",
-                    "data_dir": display_path(DATA_DIR),
-                    "warehouse_db": display_path(WAREHOUSE_DB),
+                    "data_dir": storage["data_dir"],
+                    "warehouse_db": storage["warehouse_db"],
+                    "storage": storage,
                 }
             )
             return

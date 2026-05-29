@@ -4,8 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
     PORT=8000 \
-    APP_DATA_DIR=/data \
-    APP_OUTPUT_DIR=/data/output \
+    APP_DEFAULT_DATA_DIR=/data \
     APP_ALLOWED_ORIGINS=https://vivaca86.github.io
 
 WORKDIR /app
