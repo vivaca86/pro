@@ -8,7 +8,7 @@ import json
 import pandas as pd
 
 from .config import LanguageConfig
-from .diagnosis import build_alerts, diagnose_content, diagnose_revenue
+from .diagnosis import build_alerts, diagnose_content, diagnose_data_quality, diagnose_revenue
 from .ingest import RawTable, describe_raw_table, ingest
 from .language import build_language_suggestions
 from .metrics import (
@@ -178,7 +178,8 @@ def _run_staged_pipeline(
 
     _report_progress(progress_callback, 0.78, "diagnosis", "원인 후보 계산 중")
     diagnosis = {
-        "content": diagnose_content(staged.content),
+        "content": diagnose_data_quality(staged.data_quality, staged.language_suggestions)
+        + diagnose_content(staged.content),
         "revenue": diagnose_revenue(staged.summary, staged.products, staged.purchases, staged.concentration),
     }
     alerts = build_alerts(diagnosis)
@@ -326,13 +327,13 @@ def run_pipeline(
     concentration = whale_concentration(events)
 
     _report_progress(progress_callback, 0.78, "diagnosis", "원인 후보 계산 중")
+    data_quality = assess_quality(raw_frames, events, field_reports)
+    language_suggestions = build_language_suggestions(events)
     diagnosis = {
-        "content": diagnose_content(content),
+        "content": diagnose_data_quality(data_quality, language_suggestions) + diagnose_content(content),
         "revenue": diagnose_revenue(summary, products, purchases, concentration),
     }
     alerts = build_alerts(diagnosis)
-    data_quality = assess_quality(raw_frames, events, field_reports)
-    language_suggestions = build_language_suggestions(events)
 
     _report_progress(progress_callback, 0.88, "packaging", "결과 구성 중")
     payload = {

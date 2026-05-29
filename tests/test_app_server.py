@@ -6,6 +6,15 @@ import app_server
 
 
 class AppServerStorageTest(unittest.TestCase):
+    def test_header_parameter_parser_handles_boundary_and_filename(self) -> None:
+        media_type, params = app_server.parse_header_parameters(
+            'multipart/form-data; boundary="----abc"; filename="sample.xlsx"'
+        )
+
+        self.assertEqual(media_type, "multipart/form-data")
+        self.assertEqual(params["boundary"], "----abc")
+        self.assertEqual(params["filename"], "sample.xlsx")
+
     def test_railway_volume_mount_wins_over_default_data_dir(self) -> None:
         with tempfile.TemporaryDirectory() as volume, tempfile.TemporaryDirectory() as fallback:
             data_dir, source = app_server.resolve_data_dir(

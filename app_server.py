@@ -7,7 +7,6 @@ from pathlib import Path
 from queue import Queue
 from threading import Lock, Thread
 from urllib.parse import unquote, urlparse
-import cgi
 import json
 import os
 import shutil
@@ -88,6 +87,41 @@ def write_json(path: Path, payload: dict) -> None:
 def read_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def parse_header_parameters(value: str) -> tuple[str, dict[str, str]]:
+    parts = [part.strip() for part in str(value or "").split(";")]
+    main = parts[0].lower() if parts else ""
+    params: dict[str, str] = {}
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        key, raw_value = part.split("=", 1)
+        raw_value = raw_value.strip()
+        if len(raw_value) >= 2 and raw_value[0] == raw_value[-1] == '"':
+            raw_value = raw_value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        params[key.strip().lower()] = raw_value
+    return main, params
+
+
+def decode_header_filename(value: str | None) -> str:
+    if not value:
+        return ""
+    if "''" in value:
+        charset, encoded = value.split("''", 1)
+        try:
+            return unquote(encoded, encoding=charset or "utf-8")
+        except LookupError:
+            return unquote(encoded)
+    return value
+
+
+def strip_part_line_break(value: bytes) -> bytes:
+    if value.endswith(b"\r\n"):
+        return value[:-2]
+    if value.endswith(b"\n"):
+        return value[:-1]
+    return value
 
 
 def status_path(run_id: str) -> Path:
@@ -357,10 +391,70 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _read_part_until_boundary(self, boundary: bytes, handle: object | None = None) -> bytes:
+        previous: bytes | None = None
+        while True:
+            line = self.rfile.readline()
+            if line == b"":
+                raise ValueError("Unexpected end of multipart upload.")
+            stripped = line.rstrip(b"\r\n")
+            if stripped == boundary or stripped == boundary + b"--":
+                if previous is not None and handle is not None:
+                    handle.write(strip_part_line_break(previous))
+                return stripped
+            if previous is not None and handle is not None:
+                handle.write(previous)
+            previous = line
+
+    def _read_multipart_headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        while True:
+            line = self.rfile.readline()
+            if line == b"":
+                raise ValueError("Unexpected end of multipart headers.")
+            if line in {b"\r\n", b"\n"}:
+                return headers
+            decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if ":" not in decoded:
+                continue
+            name, value = decoded.split(":", 1)
+            headers[name.strip().lower()] = value.strip()
+
+    def _save_multipart_files(self, content_type: str, raw_dir: Path, run_id: str) -> list[Path]:
+        media_type, params = parse_header_parameters(content_type)
+        boundary_value = params.get("boundary", "")
+        if media_type != "multipart/form-data" or not boundary_value:
+            raise ValueError("Only multipart/form-data uploads are supported.")
+
+        boundary = f"--{boundary_value}".encode("utf-8")
+        first_line = self.rfile.readline().rstrip(b"\r\n")
+        if first_line != boundary:
+            raise ValueError("Malformed multipart upload.")
+
+        saved: list[Path] = []
+        done = False
+        while not done:
+            headers = self._read_multipart_headers()
+            _, disposition_params = parse_header_parameters(headers.get("content-disposition", ""))
+            field_name = disposition_params.get("name")
+            filename = decode_header_filename(
+                disposition_params.get("filename*") or disposition_params.get("filename")
+            )
+            if field_name == "files" and filename:
+                safe_name = Path(filename).name
+                target = raw_dir / safe_name
+                with target.open("wb") as handle:
+                    boundary_line = self._read_part_until_boundary(boundary, handle)
+                saved.append(target)
+                shutil.copyfile(target, UPLOAD_DIR / f"{run_id}-{safe_name}")
+            else:
+                boundary_line = self._read_part_until_boundary(boundary)
+            done = boundary_line == boundary + b"--"
+
+        return saved
+
     def _handle_run(self) -> dict:
         content_type = self.headers.get("content-type", "")
-        if not content_type.startswith("multipart/form-data"):
-            raise ValueError("Only multipart/form-data uploads are supported.")
 
         run_id = make_run_id()
         run_dir = RUNS_DIR / run_id
@@ -371,30 +465,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": content_type,
-                "CONTENT_LENGTH": self.headers.get("content-length", "0"),
-            },
-        )
-
-        fields = form["files"] if "files" in form else []
-        if not isinstance(fields, list):
-            fields = [fields]
-
-        saved: list[Path] = []
-        for field in fields:
-            if not getattr(field, "filename", None):
-                continue
-            filename = Path(field.filename).name
-            target = raw_dir / filename
-            with target.open("wb") as handle:
-                shutil.copyfileobj(field.file, handle)
-            saved.append(target)
-            shutil.copyfile(target, UPLOAD_DIR / f"{run_id}-{filename}")
+        saved = self._save_multipart_files(content_type, raw_dir, run_id)
 
         if not saved:
             raise ValueError("No files were uploaded.")

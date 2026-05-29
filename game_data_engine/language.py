@@ -34,6 +34,7 @@ FIELD_ALIASES = {
         "timestamp",
         "time",
         "created_at",
+        "datetime",
         "log_dt",
         "log_at",
         "log_time",
@@ -55,6 +56,10 @@ FIELD_ALIASES = {
         "event",
         "action",
         "action_type",
+        "logtype",
+        "log_type",
+        "event_code",
+        "e_code",
         "log_name",
         "log_code",
         "log_id",
@@ -287,6 +292,20 @@ def _best_column(frame: pd.DataFrame, candidates: list[str], scorer: Any, minimu
     return scored[0][1]
 
 
+def _date_part_column(name: Any) -> bool:
+    key = normalized_name(str(name))
+    if key in {"year", "yyyy", "yy", "month", "mm", "day", "dd", "dt", "date"}:
+        return True
+    return "date" in key or "time" in key
+
+
+def _non_amount_identifier_column(name: Any) -> bool:
+    key = normalized_name(str(name))
+    if key in {"game", "gameid", "logtype", "logid", "logcode", "ecode", "type", "code"}:
+        return True
+    return key.endswith("id") or key.endswith("code") or key.endswith("type")
+
+
 def _infer_fields_from_values(frame: pd.DataFrame, guessed: FieldMapping) -> None:
     if frame.empty:
         return
@@ -323,6 +342,8 @@ def _infer_fields_from_values(frame: pd.DataFrame, guessed: FieldMapping) -> Non
 
     if not guessed.amount:
         def amount_score(series: pd.Series) -> float:
+            if _date_part_column(series.name) or _non_amount_identifier_column(series.name):
+                return 0.0
             sample = pd.to_numeric(_sample_text(series), errors="coerce").dropna()
             if sample.empty:
                 return 0.0

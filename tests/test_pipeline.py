@@ -281,6 +281,60 @@ class PipelineTest(unittest.TestCase):
             self.assertIn(config.content_labels["raid"]["label"], content_groups)
             self.assertEqual(payload["data_quality"]["field_reports"][0]["fields"]["event"], None)
 
+    def test_logtype_excel_schema_uses_log_code_not_date_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "game_log.xlsx"
+            frame = pd.DataFrame(
+                [
+                    {
+                        "e_code": "E_USER_ACTION",
+                        "user_id": 4957666,
+                        "logtype": 510101,
+                        "game": 300156,
+                        "datetime": "2026-04-27 01:56:55",
+                        "vars": '{"eventdate":"2026-04-27 01:56:55","logtype":510101}',
+                        "dt": "2026-04-27",
+                        "year": 2026,
+                        "month": 4,
+                        "day": 27,
+                    },
+                    {
+                        "e_code": "E_USER_ACTION",
+                        "user_id": 4957666,
+                        "logtype": 570202,
+                        "game": 300156,
+                        "datetime": "2026-04-27 01:57:55",
+                        "vars": '{"eventdate":"2026-04-27 01:57:55","logtype":570202}',
+                        "dt": "2026-04-27",
+                        "year": 2026,
+                        "month": 4,
+                        "day": 27,
+                    },
+                ]
+            )
+            frame.to_excel(path, index=False)
+
+            payload = run_pipeline(
+                inputs=[path],
+                dictionary_path=Path("examples/log_language.json"),
+                sample_limit=2,
+            )
+
+            fields = payload["data_quality"]["field_reports"][0]["fields"]
+            self.assertEqual(fields["timestamp"], "datetime")
+            self.assertEqual(fields["event"], "logtype")
+            self.assertIsNone(fields["amount"])
+            self.assertEqual(payload["summary"]["events"], 2)
+            raw_events = {item["raw"] for item in payload["language"]["suggestions"]}
+            self.assertIn("510101", raw_events)
+            self.assertIn("570202", raw_events)
+            issue_types = {
+                issue["type"]
+                for issues in payload["diagnosis"].values()
+                for issue in issues
+            }
+            self.assertIn("log_mapping_needed", issue_types)
+
     def test_staged_pipeline_matches_pandas_quality_and_daily_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "parity.csv"

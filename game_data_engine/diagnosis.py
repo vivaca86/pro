@@ -112,6 +112,37 @@ def diagnose_content(content: pd.DataFrame) -> list[dict[str, Any]]:
     return sorted(issues, key=lambda item: item["confidence"], reverse=True)
 
 
+def diagnose_data_quality(data_quality: dict[str, Any], language_suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized_rows = int(data_quality.get("normalized_rows", 0) or 0)
+    inferred_rows = int(data_quality.get("inferred_language_rows", 0) or 0)
+    needs_confirmation = [item for item in language_suggestions if item.get("needs_confirmation")]
+    if normalized_rows <= 0 or not needs_confirmation:
+        return []
+
+    inferred_ratio = inferred_rows / normalized_rows if normalized_rows else 0
+    if inferred_ratio < 0.5:
+        return []
+
+    examples = ", ".join(str(item.get("raw")) for item in needs_confirmation[:5])
+    return [
+        _issue(
+            title="로그 코드 매핑 필요",
+            issue_type="log_mapping_needed",
+            severity="주의",
+            cause="업로드 데이터의 이벤트 코드 의미가 사전에 없어 행동/콘텐츠/결제 해석이 제한됨",
+            evidence=[
+                f"미확인 로그 {len(needs_confirmation)}개",
+                f"추론 처리 행 {inferred_rows:,}건",
+                f"예시 코드: {examples}",
+            ],
+            impact_score=min(1, inferred_ratio),
+            evidence_score=0.8,
+            data_sufficiency=0.7,
+            recommendation="logtype/e_code별 의미를 로그 언어 설정에 추가하면 콘텐츠, 실패, 보상, 결제 흐름까지 분리됩니다.",
+        )
+    ]
+
+
 def diagnose_revenue(
     summary: dict[str, Any],
     products: pd.DataFrame,
