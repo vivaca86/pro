@@ -1,9 +1,13 @@
 const DATA_URL = "./output/analysis.json";
 const RUN_URL = "./api/run";
+const RUNS_URL = "./api/runs";
 
 let dashboardData = null;
 let selectedIssueIndex = 0;
 let selectedFiles = [];
+let showDangerOnly = false;
+let issueSort = "impact";
+let activePoll = null;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -38,17 +42,36 @@ function severityClass(severity) {
   return "neutral";
 }
 
-function allIssues(data) {
-  return [...(data.diagnosis?.content || []), ...(data.diagnosis?.revenue || [])].sort(
-    (a, b) => Number(b.confidence || 0) - Number(a.confidence || 0),
-  );
+function baseIssues(data) {
+  return [...(data.diagnosis?.content || []), ...(data.diagnosis?.revenue || [])].map((issue, index) => ({
+    ...issue,
+    _sourceIndex: index,
+  }));
 }
 
-function alertByTitle(data) {
-  return (data.alerts || []).reduce((acc, alert) => {
-    acc[alert.title] = alert;
-    return acc;
-  }, {});
+function severityRank(issue) {
+  if (issue.severity === "위험") return 2;
+  if (issue.severity === "주의") return 1;
+  return 0;
+}
+
+function sortedIssues(data) {
+  const issues = baseIssues(data);
+  const sorters = {
+    impact: (a, b) =>
+      Number(b.impact_score || 0) - Number(a.impact_score || 0) ||
+      Number(b.confidence || 0) - Number(a.confidence || 0),
+    severity: (a, b) =>
+      severityRank(b) - severityRank(a) ||
+      Number(b.impact_score || 0) - Number(a.impact_score || 0),
+    recent: (a, b) => b._sourceIndex - a._sourceIndex,
+  };
+  return issues.sort(sorters[issueSort] || sorters.impact);
+}
+
+function visibleIssues(data) {
+  const issues = sortedIssues(data);
+  return showDangerOnly ? issues.filter((issue) => issue.severity === "위험") : issues;
 }
 
 function contentRisk(row) {
@@ -61,119 +84,51 @@ function contentRisk(row) {
 function renderSummary(data) {
   const summary = data.summary || {};
   const quality = data.data_quality || {};
-  const issues = allIssues(data);
+  const issues = baseIssues(data);
   const decisionNeeded = issues.filter((issue) => issue.severity === "위험").length;
   const impact = Math.round(issues.reduce((sum, issue) => sum + Number(issue.impact_score || 0), 0) * 100);
 
   $("#sideStatus").textContent = `${number(quality.normalized_rows)}건`;
   $("#boardSummary").innerHTML = `
-    <article class="summary-card">
-      <span>Open Issues</span>
+    <div class="summary-line-item">
+      <span>이슈</span>
       <strong>${number(issues.length)}</strong>
-      <small>데이터가 만든 원인 후보</small>
-    </article>
-    <article class="summary-card danger">
-      <span>Decision Needed</span>
+    </div>
+    <div class="summary-line-item danger">
+      <span>결정 필요</span>
       <strong>${number(decisionNeeded)}</strong>
-      <small>위험 등급 카드</small>
-    </article>
-    <article class="summary-card">
-      <span>Estimated Impact</span>
+    </div>
+    <div class="summary-line-item">
+      <span>영향도</span>
       <strong>${number(impact)}</strong>
-      <small>후보 영향도 합산 점수</small>
-    </article>
-    <article class="summary-card success">
-      <span>Data Confidence</span>
+    </div>
+    <div class="summary-line-item success">
+      <span>신뢰도</span>
       <strong>${percent(quality.quality_score)}</strong>
-      <small>${number(quality.normalized_rows)}건 정규화</small>
-    </article>
-    <article class="summary-card">
-      <span>Revenue</span>
+    </div>
+    <div class="summary-line-item">
+      <span>매출</span>
       <strong>${currency(summary.revenue)}</strong>
-      <small>오늘 로우데이터 기준</small>
-    </article>
+    </div>
   `;
 }
 
-function issueStatus(issue, index, firstDangerIndex) {
-  if (issue.severity === "위험" && index === firstDangerIndex) return "결정 필요";
-  if (issue.severity === "위험") return "원인 분석";
-  if (issue.severity === "주의") return "관찰 중";
-  return "효과 검증";
-}
-
-function issueOwner(issue) {
-  if (issue.type?.includes("revenue") || issue.type?.includes("product") || issue.type?.includes("whale")) {
-    return "사업/BM";
-  }
-  if (issue.type?.includes("content")) return "기획";
-  return "분석";
-}
-
-function issueKpi(issue) {
-  if (issue.type?.includes("revenue") || issue.type?.includes("product") || issue.type?.includes("whale")) {
-    return ["매출", "PU", "ARPPU"];
-  }
-  if (issue.type?.includes("failure")) return ["실패율", "재도전", "이탈"];
-  if (issue.type?.includes("friction")) return ["대기시간", "참여율", "재참여"];
-  return ["참여율", "근거", "영향도"];
-}
-
-function boardCard(issue, index, alertLookup) {
-  const alert = alertLookup[issue.title] || {};
-  const evidence = issue.evidence || alert.top_evidence || [];
-  const shortCause = String(issue.cause_candidate || "").replace("가능성", "가능");
+function boardCard(issue, index) {
   return `
     <button class="board-card ${index === selectedIssueIndex ? "selected" : ""}" type="button" data-issue-index="${index}">
       <div class="board-card-top">
         <span class="badge ${severityClass(issue.severity)}">${escapeHtml(issue.severity || "정보")}</span>
-        <strong>${escapeHtml(issue.title)}</strong>
       </div>
-      <p>${escapeHtml(shortCause)}</p>
-      <div class="card-evidence">${escapeHtml(evidence[0] || "근거 수치 확인 필요")}</div>
-      <div class="card-meta">
-        <span>${escapeHtml(issueOwner(issue))}</span>
-        <span>${percent(issue.impact_score)}</span>
-        <span>${escapeHtml(issue.confidence_label || "-")}</span>
-      </div>
-      <div class="card-kpis">
-        ${issueKpi(issue).map((kpi) => `<i>${escapeHtml(kpi)}</i>`).join("")}
-      </div>
+      <strong class="card-title">${escapeHtml(issue.title)}</strong>
     </button>
   `;
 }
 
 function renderBoard(data) {
-  const issues = allIssues(data);
-  const alertLookup = alertByTitle(data);
-  const columns = ["관찰 중", "원인 분석", "결정 필요", "효과 검증"];
-  const grouped = Object.fromEntries(columns.map((column) => [column, []]));
-  const firstDangerIndex = issues.findIndex((issue) => issue.severity === "위험");
-
-  issues.forEach((issue, index) => {
-    const status = issueStatus(issue, index, firstDangerIndex);
-    grouped[status].push({ issue, index });
-  });
-
-  $("#decisionBoard").innerHTML = columns
-    .map(
-      (column) => `
-        <section class="board-column">
-          <header>
-            <h3>${escapeHtml(column)}</h3>
-            <span>${number(grouped[column].length)}</span>
-          </header>
-          <div class="board-card-list">
-            ${
-              grouped[column]
-                .map(({ issue, index }) => boardCard(issue, index, alertLookup))
-                .join("") || `<div class="board-empty">대기 중인 카드 없음</div>`
-            }
-          </div>
-        </section>
-      `,
-    )
-    .join("");
+  const issues = visibleIssues(data);
+  $("#decisionBoard").innerHTML =
+    issues.map((issue, index) => boardCard(issue, index)).join("") ||
+    `<div class="board-empty">${showDangerOnly ? "위험 카드가 없습니다." : "표시할 이슈가 없습니다."}</div>`;
 
   document.querySelectorAll("[data-issue-index]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -185,10 +140,10 @@ function renderBoard(data) {
 }
 
 function renderDrawer(data) {
-  const issues = allIssues(data);
+  const issues = visibleIssues(data);
   const issue = issues[selectedIssueIndex] || issues[0];
   if (!issue) {
-    $("#issueDrawer").innerHTML = `<div class="drawer-empty">표시할 이슈가 없습니다.</div>`;
+    $("#issueDrawer").innerHTML = `<div class="drawer-empty">${showDangerOnly ? "현재 위험 등급 이슈가 없습니다." : "표시할 이슈가 없습니다."}</div>`;
     return;
   }
   const evidence = issue.evidence || [];
@@ -200,7 +155,7 @@ function renderDrawer(data) {
     </div>
 
     <div class="drawer-decision">
-      <span>추천 확인 순서</span>
+      <span>확인 순서</span>
       <strong>${escapeHtml(issue.recommendation || "누적 데이터와 UID 흐름을 추가 확인하세요.")}</strong>
     </div>
 
@@ -230,8 +185,8 @@ function renderDrawer(data) {
     </div>
 
     <div class="drawer-section">
-      <h3>AI 노트</h3>
-      <p>이 카드는 로우 로그를 UID 흐름으로 재구성한 뒤, 콘텐츠/상품/세션 맥락을 근거로 만든 원인 후보입니다. 첫날 데이터에서는 확정 원인이 아니라 우선 확인할 지점으로 다룹니다.</p>
+      <h3>메모</h3>
+      <p>기준선이 부족하면 확정 원인이 아니라 먼저 볼 지점으로 다룹니다.</p>
     </div>
   `;
 }
@@ -239,20 +194,20 @@ function renderDrawer(data) {
 function renderAiBriefing(data) {
   const summary = data.summary || {};
   const quality = data.data_quality || {};
-  const issues = allIssues(data);
+  const issues = sortedIssues(data);
   $("#qualityBadge").textContent = percent(quality.quality_score);
   $("#aiBriefing").innerHTML = `
     <div class="brief-line">
       <strong>핵심 판단</strong>
-      ${issues[0] ? escapeHtml(`${issues[0].title}이 오늘 가장 먼저 볼 의사결정 후보입니다.`) : "주요 이슈가 없습니다."}
+      ${issues[0] ? escapeHtml(`${issues[0].title}을 먼저 확인하세요.`) : "주요 이슈가 없습니다."}
     </div>
     <div class="brief-line">
-      <strong>분석 범위</strong>
-      AU ${number(summary.active_users)}명, 이벤트 ${number(summary.events)}건, 세션 ${number(summary.sessions)}개를 UID 흐름으로 재구성했습니다.
+      <strong>범위</strong>
+      AU ${number(summary.active_users)}명, 이벤트 ${number(summary.events)}건, 세션 ${number(summary.sessions)}개 기준입니다.
     </div>
     <div class="brief-line">
-      <strong>해석 기준</strong>
-      전일/전주 기준선이 없으므로 오늘은 "하락 원인"이 아니라 "위험 후보와 확인 순서"를 보여줍니다.
+      <strong>기준</strong>
+      전일/전주 기준선이 없으면 확인 순서로 봅니다.
     </div>
   `;
 }
@@ -334,6 +289,7 @@ function renderDataQuality(data) {
     qualityRow("중복 후보", `${number(quality.duplicate_event_rows)}건`),
     storage.run_id ? qualityRow("실행 ID", storage.run_id) : "",
     storage.processed_dir ? qualityRow("가공 저장소", storage.processed_dir) : "",
+    storage.warehouse_db ? qualityRow("DuckDB", storage.warehouse_db) : "",
     storage.latest_analysis_json ? qualityRow("보드 입력", storage.latest_analysis_json) : "",
   ].join("");
 
@@ -347,7 +303,9 @@ function renderDataQuality(data) {
 }
 
 function render(data) {
+  if (!data) return;
   dashboardData = data;
+  applyControls();
   renderSummary(data);
   renderBoard(data);
   renderDrawer(data);
@@ -357,10 +315,105 @@ function render(data) {
   renderDataQuality(data);
 }
 
+function applyControls() {
+  const dangerToggle = $("#dangerToggle");
+  if (dangerToggle) {
+    dangerToggle.classList.toggle("active", showDangerOnly);
+    dangerToggle.setAttribute("aria-pressed", String(showDangerOnly));
+    dangerToggle.textContent = showDangerOnly ? "전체 보기" : "위험만";
+  }
+}
+
 function setUploadStatus(message, tone = "muted") {
   const status = $("#uploadStatus");
   status.textContent = message;
   status.dataset.tone = tone;
+}
+
+function progressPercent(value) {
+  const raw = Number(value || 0);
+  const ratio = raw > 1 ? raw / 100 : raw;
+  return Math.max(0, Math.min(100, Math.round(ratio * 100)));
+}
+
+function setRunProgress(value, visible = true) {
+  const track = $("#runProgress");
+  const bar = $("#runProgressBar");
+  const label = $("#runProgressPercent");
+  if (!track || !bar || !label) return;
+  const percentValue = progressPercent(value);
+  track.hidden = !visible;
+  track.setAttribute("aria-hidden", String(!visible));
+  label.hidden = !visible;
+  label.setAttribute("aria-hidden", String(!visible));
+  bar.style.width = `${percentValue}%`;
+  label.textContent = `${percentValue}%`;
+}
+
+function runStatusLabel(payload) {
+  const status = payload.status || "unknown";
+  const progress = `${progressPercent(payload.progress)}%`;
+  if (status === "queued") {
+    const position = payload.queue_position ? ` #${payload.queue_position}` : "";
+    return `대기 중${position} ${progress}`;
+  }
+  if (status === "running") return `${payload.message || "적용 중"} ${progress}`;
+  if (status === "done") return "적용 완료 100%";
+  if (status === "failed") return `실패: ${payload.error || payload.message || "확인 필요"}`;
+  return payload.message || status;
+}
+
+function stopPolling() {
+  if (activePoll) {
+    clearTimeout(activePoll);
+    activePoll = null;
+  }
+}
+
+function resetUploadButton() {
+  const button = $("#uploadButton");
+  button.disabled = !selectedFiles.length;
+  button.textContent = "분석 실행";
+}
+
+async function loadRunAnalysis(runId) {
+  const response = await fetch(`${RUNS_URL}/${encodeURIComponent(runId)}/analysis?v=${Date.now()}`);
+  if (!response.ok) throw new Error(`분석 결과를 읽을 수 없습니다. HTTP ${response.status}`);
+  return response.json();
+}
+
+async function pollRun(runId) {
+  try {
+    const response = await fetch(`${RUNS_URL}/${encodeURIComponent(runId)}/status?v=${Date.now()}`);
+    if (!response.ok) throw new Error(`상태를 읽을 수 없습니다. HTTP ${response.status}`);
+    const status = await response.json();
+    setRunProgress(status.progress, status.status !== "failed");
+    setUploadStatus(runStatusLabel(status), status.status === "failed" ? "danger" : "muted");
+
+    if (status.status === "done") {
+      const payload = await loadRunAnalysis(runId);
+      selectedIssueIndex = 0;
+      render(payload);
+      updateSelectedFiles([]);
+      setRunProgress(1, true);
+      setUploadStatus(`완료: ${status.uploaded_files?.join(", ") || runId}`, "success");
+      stopPolling();
+      resetUploadButton();
+      return;
+    }
+    if (status.status === "failed") {
+      setRunProgress(1, false);
+      stopPolling();
+      resetUploadButton();
+      return;
+    }
+    activePoll = setTimeout(() => pollRun(runId), 1500);
+  } catch (error) {
+    setRunProgress(1, false);
+    setUploadStatus(error.message, "danger");
+    stopPolling();
+    resetUploadButton();
+  }
 }
 
 function updateSelectedFiles(files) {
@@ -370,11 +423,13 @@ function updateSelectedFiles(files) {
   if (!selectedFiles.length) {
     label.textContent = "파일 선택 또는 드래그";
     button.disabled = true;
+    setRunProgress(0, false);
     setUploadStatus("입력 대기");
     return;
   }
   label.textContent = selectedFiles.map((file) => file.name).join(", ");
   button.disabled = false;
+  setRunProgress(0, false);
   setUploadStatus(`${number(selectedFiles.length)}개 파일 선택됨`);
 }
 
@@ -384,22 +439,33 @@ async function uploadAndRun() {
   const form = new FormData();
   selectedFiles.forEach((file) => form.append("files", file));
   button.disabled = true;
-  button.textContent = "분석 중";
-  setUploadStatus("업로드 후 엔진 실행 중입니다.");
+  button.textContent = "적용 중";
+  stopPolling();
+  setRunProgress(0.02, true);
+  setUploadStatus("업로드 중 2%");
   try {
     const response = await fetch(RUN_URL, { method: "POST", body: form });
     const payload = await response.json();
     if (!response.ok || payload.error) {
       throw new Error(payload.error || `분석 실행 실패: HTTP ${response.status}`);
     }
+    if (payload.run_id && payload.status && !payload.summary) {
+      setRunProgress(payload.progress, true);
+      setUploadStatus(`${runStatusLabel(payload)}: ${payload.run_id}`);
+      activePoll = setTimeout(() => pollRun(payload.run_id), 900);
+      return;
+    }
     selectedIssueIndex = 0;
     render(payload);
+    setRunProgress(1, true);
     setUploadStatus(`완료: ${payload.uploaded_files?.join(", ") || "파일 분석됨"}`, "success");
   } catch (error) {
+    setRunProgress(1, false);
     setUploadStatus(error.message, "danger");
   } finally {
-    button.disabled = !selectedFiles.length;
-    button.textContent = "분석 실행";
+    if (!activePoll) {
+      resetUploadButton();
+    }
   }
 }
 
@@ -408,7 +474,7 @@ async function loadDashboard() {
     const response = await fetch(`${DATA_URL}?v=${Date.now()}`);
     if (!response.ok) throw new Error(`analysis.json을 읽을 수 없습니다. HTTP ${response.status}`);
     const data = await response.json();
-    const firstDangerIndex = allIssues(data).findIndex((issue) => issue.severity === "위험");
+    const firstDangerIndex = visibleIssues(data).findIndex((issue) => issue.severity === "위험");
     selectedIssueIndex = firstDangerIndex >= 0 ? firstDangerIndex : 0;
     render(data);
   } catch (error) {
@@ -420,9 +486,39 @@ async function loadDashboard() {
   }
 }
 
+function downloadCurrentReport() {
+  if (!dashboardData) return;
+  const blob = new Blob([JSON.stringify(dashboardData, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  const runId = dashboardData.storage?.run_id || "latest";
+  anchor.href = url;
+  anchor.download = `analysis-${runId}.json`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 $("#reloadButton").addEventListener("click", loadDashboard);
 $("#uploadButton").addEventListener("click", uploadAndRun);
 $("#fileInput").addEventListener("change", (event) => updateSelectedFiles(event.target.files));
+$("#sortSelect").addEventListener("change", (event) => {
+  if (!dashboardData) return;
+  const label = event.target.value;
+  issueSort = label.includes("위험도") ? "severity" : label.includes("최근") ? "recent" : "impact";
+  selectedIssueIndex = 0;
+  render(dashboardData);
+});
+$("#dangerToggle").addEventListener("click", () => {
+  if (!dashboardData) return;
+  showDangerOnly = !showDangerOnly;
+  selectedIssueIndex = 0;
+  applyControls();
+  renderBoard(dashboardData);
+  renderDrawer(dashboardData);
+});
+$("#downloadButton").addEventListener("click", downloadCurrentReport);
 
 const fileDrop = $("#fileDrop");
 fileDrop.addEventListener("dragover", (event) => {

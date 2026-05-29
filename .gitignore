@@ -1,4 +1,6 @@
 __pycache__/
+.venv/
+*.egg-info/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
@@ -6,3 +8,6 @@ __pycache__/
 output/
 data/uploads/
 data/runs/
+data/warehouse/
+data/staging/
+staging/

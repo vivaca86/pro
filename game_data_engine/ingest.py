@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 import json
@@ -8,6 +9,28 @@ import pandas as pd
 
 
 SUPPORTED_SUFFIXES = {".csv", ".tsv", ".txt", ".json", ".jsonl", ".xlsx", ".xls"}
+
+
+@dataclass(frozen=True)
+class RawTableInfo:
+    source_file: str
+    row_count: int
+    columns: list[str]
+    source_sheet: str | None = None
+
+
+RawTable = pd.DataFrame | RawTableInfo
+
+
+def describe_raw_table(table: RawTable) -> RawTableInfo:
+    if isinstance(table, RawTableInfo):
+        return table
+    return RawTableInfo(
+        source_file=str(table["_source_file"].iloc[0]) if "_source_file" in table and not table.empty else "unknown",
+        source_sheet=str(table["_source_sheet"].iloc[0]) if "_source_sheet" in table and not table.empty else None,
+        row_count=int(len(table)),
+        columns=[str(column) for column in table.columns if not str(column).startswith("_source")],
+    )
 
 
 def discover_files(inputs: Iterable[str | Path]) -> list[Path]:

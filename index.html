@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Game Data Decision Board</title>
-    <link rel="stylesheet" href="./assets/styles.css?v=board-20260528-5" />
+    <link rel="stylesheet" href="./assets/styles.css?v=board-20260529-2" />
   </head>
   <body>
     <div class="app-shell board-shell">
@@ -36,25 +36,25 @@
       <main class="main board-main">
         <header class="topbar board-topbar">
           <div>
-            <p class="eyebrow">Executive Decision Board</p>
+            <p class="eyebrow">Dashboard</p>
             <h1>이슈 보드</h1>
           </div>
           <div class="topbar-actions">
             <label>
               프로젝트
-              <select>
+              <select aria-label="프로젝트 선택">
                 <option>Dragon Realm</option>
               </select>
             </label>
             <label>
               데이터 버전
-              <select>
+              <select aria-label="데이터 버전 선택">
                 <option>2026-05-28</option>
               </select>
             </label>
             <label>
               정렬
-              <select>
+              <select id="sortSelect" aria-label="이슈 정렬">
                 <option>영향도 높은 순</option>
                 <option>위험도 높은 순</option>
                 <option>최근 발견 순</option>
@@ -64,15 +64,15 @@
           </div>
         </header>
 
-        <section class="board-summary" id="boardSummary" aria-live="polite">
+        <section class="board-summary" id="boardSummary" aria-live="polite" hidden>
           <article class="summary-card loading">analysis.json을 읽는 중입니다.</article>
         </section>
 
         <section class="upload-panel" id="input">
           <div class="upload-copy">
-            <p class="eyebrow">Data Input</p>
-            <h2>로우데이터 입력</h2>
-            <p>CSV, XLSX, TXT 파일을 넣으면 UID 흐름으로 가공하고 보드를 다시 만듭니다.</p>
+            <p class="eyebrow">Input</p>
+            <h2>업로드</h2>
+            <p>CSV, XLSX, TXT 파일을 업로드합니다.</p>
           </div>
           <label class="file-drop" id="fileDrop">
             <input id="fileInput" type="file" multiple accept=".csv,.tsv,.txt,.json,.jsonl,.xlsx,.xls" />
@@ -81,7 +81,13 @@
           </label>
           <div class="upload-actions">
             <button class="button primary" id="uploadButton" type="button" disabled>분석 실행</button>
-            <span id="uploadStatus">입력 대기</span>
+            <div class="upload-status-line">
+              <span id="uploadStatus">입력 대기</span>
+              <strong id="runProgressPercent" hidden aria-hidden="true">0%</strong>
+            </div>
+            <div class="progress-track" id="runProgress" hidden aria-hidden="true">
+              <span id="runProgressBar"></span>
+            </div>
           </div>
         </section>
 
@@ -89,13 +95,12 @@
           <article class="decision-board-panel">
             <div class="board-panel-header">
               <div>
-                <p class="eyebrow">Decision Flow</p>
-                <h2>데이터가 만든 의사결정 카드</h2>
+                <p class="eyebrow">Issues</p>
+                <h2>이슈</h2>
               </div>
               <div class="board-tools">
-                <button class="button ghost" type="button">위험만</button>
-                <button class="button ghost" type="button">담당 조직</button>
-                <button class="button ghost" type="button">보고서 저장</button>
+                <button class="button ghost" id="dangerToggle" type="button" aria-pressed="false">위험만</button>
+                <button class="button ghost" id="downloadButton" type="button">JSON 저장</button>
               </div>
             </div>
             <div class="decision-board" id="decisionBoard"></div>
@@ -110,8 +115,8 @@
           <article class="panel" id="brief">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">AI Briefing</p>
-                <h2>오늘의 분석 요약</h2>
+                <p class="eyebrow">Briefing</p>
+                <h2>요약</h2>
               </div>
               <span class="badge success" id="qualityBadge">-</span>
             </div>
@@ -121,8 +126,8 @@
           <article class="panel" id="content">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">Content Health</p>
-                <h2>콘텐츠 건강도 지도</h2>
+                <p class="eyebrow">Content</p>
+                <h2>콘텐츠</h2>
               </div>
             </div>
             <div id="contentMap" class="content-map compact"></div>
@@ -131,8 +136,8 @@
           <article class="panel" id="revenue">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">Revenue Context</p>
-                <h2>상품 · 구매 직전 흐름</h2>
+                <p class="eyebrow">Revenue</p>
+                <h2>매출</h2>
               </div>
             </div>
             <div id="productList" class="product-list"></div>
@@ -147,8 +152,8 @@
           <article class="panel">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">Data Center</p>
-                <h2>데이터 상태</h2>
+                <p class="eyebrow">Data</p>
+                <h2>상태</h2>
               </div>
             </div>
             <div id="dataQuality" class="quality-list"></div>
@@ -157,8 +162,8 @@
           <article class="panel" id="language">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">Log Language</p>
-                <h2>로그 언어 설정 상태</h2>
+                <p class="eyebrow">Language</p>
+                <h2>로그 언어</h2>
               </div>
             </div>
             <div id="languageStatus" class="quality-list"></div>
@@ -167,6 +172,6 @@
       </main>
     </div>
 
-    <script src="./assets/dashboard.js?v=board-20260528-5"></script>
+    <script src="./assets/dashboard.js?v=board-20260529-2"></script>
   </body>
 </html>
