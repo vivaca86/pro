@@ -8,6 +8,8 @@ import pandas as pd
 
 UNKNOWN_CODE = "unknown"
 EMPTY_VALUES = {"", "nan", "none", "null", "<na>"}
+SHORT_REPEAT_WINDOW_SECONDS = 60
+SHORT_REPEAT_MIN_EVENTS = 3
 
 
 def _jsonable(value: Any) -> Any:
@@ -66,6 +68,7 @@ def _empty_behavior() -> dict[str, Any]:
         "common_paths": [],
         "transition_rates": [],
         "loop_patterns": [],
+        "short_interval_repeats": [],
         "entry_events": [],
         "exit_events": [],
         "stop_points": [],
@@ -267,10 +270,106 @@ def _loop_rows(transitions: list[dict[str, Any]], limit: int) -> list[dict[str, 
     return loops[:limit]
 
 
+def _short_interval_repeat_rows(
+    frame: pd.DataFrame,
+    limit: int,
+    total_users: int,
+    window_seconds: int = SHORT_REPEAT_WINDOW_SECONDS,
+    min_events: int = SHORT_REPEAT_MIN_EVENTS,
+) -> list[dict[str, Any]]:
+    if frame.empty or "ts" not in frame.columns:
+        return []
+    scoped = frame[frame["ts"].notna()].copy()
+    if scoped.empty:
+        return []
+
+    label_lookup = scoped.groupby("_event_code")["_event_label"].first().to_dict()
+    type_lookup = scoped.groupby("_event_code")["_event_type"].first().to_dict()
+    group_lookup = scoped.groupby("_event_code")["_event_group"].first().to_dict()
+    code_stats: dict[str, dict[str, Any]] = {}
+    for (uid, code), group in scoped.sort_values(["uid", "_event_code", "ts", "_row_order"]).groupby(
+        ["uid", "_event_code"], sort=False
+    ):
+        times = [item for item in group["ts"].tolist() if pd.notna(item)]
+        if len(times) < min_events:
+            continue
+        left = 0
+        max_events = 0
+        shortest_window: float | None = None
+        burst_window_count = 0
+        for right, current in enumerate(times):
+            while left <= right and (current - times[left]).total_seconds() > window_seconds:
+                left += 1
+            count = right - left + 1
+            if count < min_events:
+                continue
+            burst_window_count += 1
+            span = max(0.0, (current - times[left]).total_seconds())
+            if count > max_events or (count == max_events and (shortest_window is None or span < shortest_window)):
+                max_events = count
+                shortest_window = span
+        if max_events < min_events:
+            continue
+        code_text = str(code)
+        stats = code_stats.setdefault(
+            code_text,
+            {
+                "code": code_text,
+                "label": str(label_lookup.get(code_text) or code_text),
+                "event_type": str(type_lookup.get(code_text) or "event"),
+                "group": str(group_lookup.get(code_text) or ""),
+                "users": set(),
+                "burst_window_count": 0,
+                "max_events_in_window": 0,
+                "shortest_window_seconds": None,
+                "total_events_in_repeating_users": 0,
+            },
+        )
+        stats["users"].add(str(uid))
+        stats["burst_window_count"] += burst_window_count
+        stats["max_events_in_window"] = max(int(stats["max_events_in_window"]), max_events)
+        if shortest_window is not None:
+            previous = stats["shortest_window_seconds"]
+            stats["shortest_window_seconds"] = shortest_window if previous is None else min(float(previous), shortest_window)
+        stats["total_events_in_repeating_users"] += len(times)
+
+    denominator = max(int(total_users or 0), 1)
+    rows: list[dict[str, Any]] = []
+    for stats in code_stats.values():
+        user_count = len(stats["users"])
+        rows.append(
+            {
+                "code": stats["code"],
+                "label": stats["label"],
+                "event_type": stats["event_type"],
+                "group": stats["group"] or None,
+                "user_count": user_count,
+                "user_rate": round(user_count / denominator, 4),
+                "burst_window_count": int(stats["burst_window_count"]),
+                "max_events_in_window": int(stats["max_events_in_window"]),
+                "shortest_window_seconds": int(round(float(stats["shortest_window_seconds"] or 0))),
+                "window_seconds": int(window_seconds),
+                "min_events": int(min_events),
+                "total_events_in_repeating_users": int(stats["total_events_in_repeating_users"]),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -int(row["user_count"]),
+            -int(row["max_events_in_window"]),
+            int(row["shortest_window_seconds"]),
+            -int(row["burst_window_count"]),
+            str(row["code"]),
+        )
+    )
+    return _jsonable(rows[:limit])
+
+
 def _outlier_rows(
     participation: list[dict[str, Any]],
     transition_rates: list[dict[str, Any]],
     loop_patterns: list[dict[str, Any]],
+    short_interval_repeats: list[dict[str, Any]],
     stop_points: list[dict[str, Any]],
     total_users: int,
     limit: int = 12,
@@ -319,6 +418,23 @@ def _outlier_rows(
                     "user_rate": user_rate,
                     "metric": count,
                     "evidence": f"{int(item.get('user_count') or 0)}명에게 {count}회 반복 전환",
+                }
+            )
+    for item in short_interval_repeats:
+        user_count = int(item.get("user_count") or 0)
+        max_events = int(item.get("max_events_in_window") or 0)
+        if user_count >= 1 and max_events >= SHORT_REPEAT_MIN_EVENTS:
+            label = str(item.get("label") or item.get("code") or "-")
+            window_seconds = int(item.get("window_seconds") or SHORT_REPEAT_WINDOW_SECONDS)
+            rows.append(
+                {
+                    "type": "short_interval_repeat",
+                    "title": f"{label} 짧은 시간 반복",
+                    "code": item.get("code"),
+                    "user_count": user_count,
+                    "user_rate": item.get("user_rate"),
+                    "metric": max_events,
+                    "evidence": f"{user_count}명, {window_seconds}초 안 최대 {max_events}회",
                 }
             )
     for item in stop_points:
@@ -462,10 +578,11 @@ def build_behavior_flow(events: pd.DataFrame, sample_limit: int = 8, sequence_li
     participation = _top_code_rows(frame, 20, total_users=total_users)
     transition_rates = _transition_rows(frame, 30, total_users=total_users)
     loop_patterns = _loop_rows(transition_rates, 8)
+    short_interval_repeats = _short_interval_repeat_rows(frame, 12, total_users)
     entry_events = _distribution_rows(frame, 8, total_users, "first")
     exit_events = _distribution_rows(frame, 8, total_users, "last")
     common_paths = _common_path_rows(frame, 12, total_users)
-    outliers = _outlier_rows(participation, transition_rates, loop_patterns, exit_events, total_users)
+    outliers = _outlier_rows(participation, transition_rates, loop_patterns, short_interval_repeats, exit_events, total_users)
 
     return _jsonable(
         {
@@ -477,6 +594,7 @@ def build_behavior_flow(events: pd.DataFrame, sample_limit: int = 8, sequence_li
             "common_paths": common_paths,
             "transition_rates": transition_rates,
             "loop_patterns": loop_patterns,
+            "short_interval_repeats": short_interval_repeats,
             "entry_events": entry_events,
             "exit_events": exit_events,
             "stop_points": exit_events,
@@ -683,6 +801,107 @@ def build_behavior_flow_from_duckdb(
 
     participation = top_codes
     loop_patterns = _loop_rows(transition_rates, 8)
+
+    short_interval_repeats = _records(
+        con.execute(
+            f"""
+            WITH base AS (
+                SELECT
+                    uid,
+                    event_order,
+                    ts,
+                    {CODE_SQL} AS code,
+                    {LABEL_SQL} AS label,
+                    {EVENT_TYPE_SQL} AS event_type,
+                    {EVENT_GROUP_SQL} AS "group"
+                FROM events_ordered
+                WHERE uid IS NOT NULL
+                  AND TRIM(CAST(uid AS VARCHAR)) <> ''
+                  AND ts IS NOT NULL
+            ),
+            ordered AS (
+                SELECT
+                    *,
+                    LEAD(ts, {SHORT_REPEAT_MIN_EVENTS - 1}) OVER (
+                        PARTITION BY uid, code
+                        ORDER BY ts, event_order
+                    ) AS threshold_ts
+                FROM base
+            ),
+            candidates AS (
+                SELECT *
+                FROM ordered
+                WHERE threshold_ts IS NOT NULL
+                  AND threshold_ts <= ts + INTERVAL '{SHORT_REPEAT_WINDOW_SECONDS} seconds'
+            ),
+            windows AS (
+                SELECT
+                    c.uid,
+                    c.code,
+                    ANY_VALUE(c.label) AS label,
+                    ANY_VALUE(c.event_type) AS event_type,
+                    ANY_VALUE(c."group") AS "group",
+                    c.ts AS start_ts,
+                    COUNT(*)::BIGINT AS events_in_window,
+                    DATE_DIFF('second', c.ts, MAX(b.ts))::BIGINT AS window_span_seconds
+                FROM candidates c
+                JOIN base b
+                  ON b.uid = c.uid
+                 AND b.code = c.code
+                 AND b.ts >= c.ts
+                 AND b.ts <= c.ts + INTERVAL '{SHORT_REPEAT_WINDOW_SECONDS} seconds'
+                GROUP BY c.uid, c.code, c.ts
+                HAVING COUNT(*) >= {SHORT_REPEAT_MIN_EVENTS}
+            ),
+            user_bursts AS (
+                SELECT
+                    uid,
+                    code,
+                    ANY_VALUE(label) AS label,
+                    ANY_VALUE(event_type) AS event_type,
+                    ANY_VALUE("group") AS "group",
+                    COUNT(*)::BIGINT AS burst_window_count,
+                    MAX(events_in_window)::BIGINT AS max_events_in_window,
+                    MIN(window_span_seconds)::BIGINT AS shortest_window_seconds
+                FROM windows
+                GROUP BY uid, code
+            ),
+            code_stats AS (
+                SELECT
+                    code,
+                    ANY_VALUE(label) AS label,
+                    ANY_VALUE(event_type) AS event_type,
+                    ANY_VALUE("group") AS "group",
+                    COUNT(DISTINCT uid)::BIGINT AS user_count,
+                    SUM(burst_window_count)::BIGINT AS burst_window_count,
+                    MAX(max_events_in_window)::BIGINT AS max_events_in_window,
+                    MIN(shortest_window_seconds)::BIGINT AS shortest_window_seconds
+                FROM user_bursts
+                GROUP BY code
+            ),
+            repeating_events AS (
+                SELECT
+                    b.code,
+                    COUNT(*)::BIGINT AS total_events_in_repeating_users
+                FROM base b
+                JOIN (SELECT DISTINCT uid, code FROM user_bursts) u
+                  ON u.uid = b.uid AND u.code = b.code
+                GROUP BY b.code
+            )
+            SELECT
+                code_stats.*,
+                ROUND(code_stats.user_count::DOUBLE / NULLIF(?::DOUBLE, 0), 4)::DOUBLE AS user_rate,
+                {SHORT_REPEAT_WINDOW_SECONDS}::BIGINT AS window_seconds,
+                {SHORT_REPEAT_MIN_EVENTS}::BIGINT AS min_events,
+                COALESCE(repeating_events.total_events_in_repeating_users, 0)::BIGINT AS total_events_in_repeating_users
+            FROM code_stats
+            LEFT JOIN repeating_events USING (code)
+            ORDER BY user_count DESC, max_events_in_window DESC, shortest_window_seconds, burst_window_count DESC, code
+            LIMIT ?
+            """,
+            [user_count, 12],
+        ).fetchdf()
+    )
 
     common_paths = _records(
         con.execute(
@@ -891,7 +1110,14 @@ def build_behavior_flow_from_duckdb(
             [user_count, 8],
         ).fetchdf()
     )
-    outliers = _outlier_rows(participation, transition_rates, loop_patterns, exit_events, int(user_count or 0))
+    outliers = _outlier_rows(
+        participation,
+        transition_rates,
+        loop_patterns,
+        short_interval_repeats,
+        exit_events,
+        int(user_count or 0),
+    )
 
     top_users = con.execute(
         """
@@ -1003,6 +1229,7 @@ def build_behavior_flow_from_duckdb(
             "common_paths": common_paths,
             "transition_rates": transition_rates,
             "loop_patterns": loop_patterns,
+            "short_interval_repeats": short_interval_repeats,
             "entry_events": entry_events,
             "exit_events": exit_events,
             "stop_points": exit_events,

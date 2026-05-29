@@ -103,19 +103,19 @@ function codeLabel(raw) {
   return label === code ? code : `${label} / ${code}`;
 }
 
-function codeEditButton(raw) {
-  const code = String(raw || "").trim();
-  if (!code || code === "-") return "";
-  return `<button class="quick-map-button" type="button" data-map-code="${escapeHtml(code)}">이름 지정</button>`;
-}
-
 function renderCodeWithAction(raw) {
   const code = String(raw || "").trim();
+  if (!code || code === "-") return `<span class="code-with-action"><span>-</span></span>`;
   return `
-    <span class="code-with-action">
+    <button
+      class="code-with-action"
+      type="button"
+      data-map-code="${escapeHtml(code)}"
+      title="로그 이름 지정"
+      aria-label="${escapeHtml(`${code} 로그 이름 지정`)}"
+    >
       <span>${escapeHtml(codeLabel(code))}</span>
-      ${codeEditButton(code)}
-    </span>
+    </button>
   `;
 }
 
@@ -150,6 +150,7 @@ function knownLogCodes(data) {
     if (item?.to) codes.add(String(item.to));
   });
   (behavior.loop_patterns || []).forEach((item) => item?.from && codes.add(String(item.from)));
+  (behavior.short_interval_repeats || []).forEach((item) => item?.code && codes.add(String(item.code)));
   [...(behavior.entry_events || []), ...(behavior.exit_events || [])].forEach((item) => {
     if (item?.code) codes.add(String(item.code));
     if (item?.label) codes.add(String(item.label));
@@ -457,6 +458,7 @@ function renderBehaviorFlow(data) {
   const transitions = (behavior.transition_rates || behavior.top_transitions || []).map(behaviorCode);
   const commonPaths = behavior.common_paths || [];
   const loopPatterns = behavior.loop_patterns || [];
+  const shortIntervalRepeats = behavior.short_interval_repeats || [];
   const outliers = behavior.outliers || [];
   const contentRows = behavior.content_participation || [];
   const entryEvents = behavior.entry_events || [];
@@ -479,20 +481,24 @@ function renderBehaviorFlow(data) {
   const strongestOutlier = outliers[0];
   const dominantTransition = transitions[0];
   const strongestLoop = loopPatterns[0];
+  const strongestShortRepeat = shortIntervalRepeats[0];
   const stopPoint = exitEvents[0];
   const pathRate = Number(strongestPath?.user_rate || 0);
   const transitionRate = Number(dominantTransition?.transition_rate || dominantTransition?.user_rate || 0);
   const loopRate = Number(strongestLoop?.user_rate || 0);
   const stopRate = Number(stopPoint?.user_rate || 0);
   const pathSentence = strongestPath
-    ? `${number(strongestPath.user_count)}명 중 ${percent(pathRate)}가 같은 대표 루트를 공유합니다.`
-    : "아직 대표 루트가 뚜렷하게 잡히지 않았습니다.";
+    ? `${number(strongestPath.user_count)}명 중 ${percent(pathRate)}에서 같은 행동 순서가 관찰됩니다.`
+    : "반복해서 관찰된 행동 순서가 아직 부족합니다.";
   const transitionSentence = dominantTransition
-    ? `${dominantTransition.from || "-"} → ${dominantTransition.to || "-"} 전환은 ${percent(transitionRate)}입니다.`
-    : "전환 집중도를 계산할 수 있는 구간이 부족합니다.";
+    ? `${dominantTransition.from || "-"} → ${dominantTransition.to || "-"} 다음 행동 비율은 ${percent(transitionRate)}입니다.`
+    : "다음 행동 비율을 계산할 구간이 부족합니다.";
   const loopSentence = strongestLoop
-    ? `${strongestLoop.from || "-"} 반복이 ${number(strongestLoop.count)}회 관찰되어 막힘 또는 재시도 후보입니다.`
-    : "반복 루프는 아직 두드러지지 않습니다.";
+    ? `${strongestLoop.from || "-"} 반복이 ${number(strongestLoop.count)}회 관찰됩니다.`
+    : "같은 코드 반복은 아직 두드러지지 않습니다.";
+  const shortRepeatSentence = strongestShortRepeat
+    ? `${strongestShortRepeat.code || "-"}는 ${number(strongestShortRepeat.window_seconds)}초 안 최대 ${number(strongestShortRepeat.max_events_in_window)}회 생성됩니다.`
+    : "";
 
   const journeySteps =
     strongestPathSteps
@@ -500,58 +506,67 @@ function renderBehaviorFlow(data) {
         (step, index) => `
           <div class="flow-step">
             <span>${String(index + 1).padStart(2, "0")}</span>
-            <strong>${escapeHtml(codeLabel(step))}</strong>
-            ${codeEditButton(step)}
+            <strong>${renderCodeWithAction(step)}</strong>
           </div>
         `,
       )
-      .join(`<span class="flow-connector">→</span>`) || `<p class="empty">대표 경로 데이터가 없습니다.</p>`;
+      .join(`<span class="flow-connector">→</span>`) || `<p class="empty">반복 관찰된 순서 데이터가 없습니다.</p>`;
 
   const insightCards = [
     {
       tone: pathRate >= 0.8 ? "strong" : "watch",
-      label: "대표 루트",
-      title: strongestPath ? behaviorPathText(strongestPath) : "공통 루트 부족",
+      label: "많이 나온 순서",
+      title: strongestPath ? behaviorPathText(strongestPath) : "공통 순서 부족",
       finding: strongestPath
         ? pathRate >= 0.8
-          ? "대부분의 유저가 같은 흐름을 지나갑니다. 이 루트가 현재 기준 행동선입니다."
-          : "대표 루트가 일부 유저에게만 강하게 나타납니다. 세그먼트별로 갈라볼 필요가 있습니다."
-        : "공통 경로가 충분히 반복되지 않았습니다.",
+          ? "현재 데이터에서 가장 많이 반복 관찰된 행동 순서입니다."
+          : "일부 유저에게서 반복 관찰된 행동 순서입니다."
+        : "공통 행동 순서가 충분히 반복되지 않았습니다.",
       evidence: strongestPath
         ? `${number(strongestPath.user_count)}명 · ${percent(pathRate)} · ${number(strongestPath.occurrence_count)}회`
         : "근거 부족",
     },
     {
       tone: transitionRate >= 0.8 ? "strong" : "watch",
-      label: "전환 집중",
+      label: "다음 행동 비율",
       title: dominantTransition ? `${dominantTransition.from || "-"} → ${dominantTransition.to || "-"}` : "전환 부족",
       finding: dominantTransition
         ? transitionRate >= 0.8
-          ? "앞 행동을 한 유저가 거의 같은 다음 행동으로 이동합니다. 흐름이 강하게 고정된 구간입니다."
-          : "다음 행동이 갈라지는 구간입니다. 여기서 선택지, 실패, 탐색 행동을 확인해야 합니다."
+          ? "앞 행동 이후 같은 다음 행동이 많이 관찰됩니다."
+          : "앞 행동 이후 다음 행동이 여러 방향으로 나뉩니다."
         : "전환을 판단할 만큼 이어진 행동이 부족합니다.",
       evidence: dominantTransition
         ? `${number(dominantTransition.from_user_count || dominantTransition.user_count)}명 중 ${number(dominantTransition.user_count)}명 · ${percent(transitionRate)}`
         : "근거 부족",
     },
     {
-      tone: strongestLoop ? "danger" : "calm",
-      label: "반복/막힘",
-      title: strongestLoop ? `${strongestLoop.from || "-"} 반복` : "뚜렷한 반복 없음",
-      finding: strongestLoop
-        ? "같은 지점으로 되돌아오는 행동이 보입니다. 실패, 대기, 보상 확인, 재도전 중 하나인지 로그 언어 매핑으로 확인해야 합니다."
-        : "반복 루프가 강하지 않아 막힘 신호는 낮습니다.",
-      evidence: strongestLoop ? `${number(strongestLoop.user_count)}명 · ${percent(loopRate)} · ${number(strongestLoop.count)}회` : "관찰 낮음",
+      tone: strongestShortRepeat ? "danger" : strongestLoop ? "watch" : "calm",
+      label: strongestShortRepeat ? "짧은 시간 반복" : "반복 발생",
+      title: strongestShortRepeat
+        ? codeLabel(strongestShortRepeat.code || "-")
+        : strongestLoop
+          ? `${strongestLoop.from || "-"} 반복`
+          : "뚜렷한 반복 없음",
+      finding: strongestShortRepeat
+        ? "같은 UID에서 짧은 시간 안에 같은 코드가 여러 번 생성됩니다. 의미 확인 우선순위가 높습니다."
+        : strongestLoop
+          ? "같은 코드가 연속 또는 반복으로 관찰됩니다. 의미는 로그 이름을 맞춘 뒤 확인합니다."
+          : "같은 코드 반복이 두드러지지 않습니다.",
+      evidence: strongestShortRepeat
+        ? `${number(strongestShortRepeat.user_count)}명 · ${number(strongestShortRepeat.window_seconds)}초 안 최대 ${number(strongestShortRepeat.max_events_in_window)}회`
+        : strongestLoop
+          ? `${number(strongestLoop.user_count)}명 · ${percent(loopRate)} · ${number(strongestLoop.count)}회`
+          : "관찰 낮음",
     },
     {
       tone: stopRate >= 0.7 ? "watch" : "calm",
-      label: "종료 지점",
+      label: "마지막 행동",
       title: stopPoint ? behaviorItemLabel(stopPoint) : "종료 분산",
       finding: stopPoint
         ? stopRate >= 0.7
-          ? "마지막 행동이 한 지점에 몰립니다. 정상 완료인지 이탈인지 확인해야 합니다."
-          : "종료 지점이 분산되어 있어 특정 막힘으로 단정하기 어렵습니다."
-        : "종료 행동 분포가 부족합니다.",
+          ? "마지막으로 관찰된 행동이 한 코드에 많이 모입니다."
+          : "마지막으로 관찰된 행동이 여러 코드로 나뉩니다."
+        : "마지막 행동 분포가 부족합니다.",
       evidence: stopPoint ? `${number(stopPoint.user_count)}명 · ${percent(stopRate)}` : "근거 부족",
     },
   ];
@@ -633,7 +648,6 @@ function renderBehaviorFlow(data) {
           <div class="behavior-code-list">
             <span>${escapeHtml(item.event_type || "event")}</span>
             ${item.group ? `<span>${escapeHtml(item.group)}</span>` : ""}
-            ${codeEditButton(item.code || item.label)}
           </div>
         </article>
       `,
@@ -659,6 +673,18 @@ function renderBehaviorFlow(data) {
         <div class="transition-row loop">
           <strong>${renderCodeWithAction(item.from || "-")} 반복</strong>
           <span>${number(item.user_count)}명 · ${number(item.count)}회 · ${percent(item.user_rate)}</span>
+        </div>
+      `,
+    )
+    .join("");
+
+  const shortRepeatRows = shortIntervalRepeats
+    .slice(0, 8)
+    .map(
+      (item) => `
+        <div class="transition-row danger">
+          <strong>${renderCodeWithAction(item.code || "-")}</strong>
+          <span>${number(item.user_count)}명 · ${number(item.window_seconds)}초 안 최대 ${number(item.max_events_in_window)}회 · 반복 구간 ${number(item.burst_window_count)}개</span>
         </div>
       `,
     )
@@ -706,22 +732,22 @@ function renderBehaviorFlow(data) {
   container.innerHTML = `
     <section class="flow-analysis-card">
       <div class="flow-analysis-copy">
-        <span>흐름 해석</span>
+        <span>데이터 관찰</span>
         <h3>${escapeHtml(pathSentence)}</h3>
-        <p>${escapeHtml(`${transitionSentence} ${loopSentence}`)}</p>
+        <p>${escapeHtml(`${transitionSentence} ${loopSentence}${shortRepeatSentence ? ` ${shortRepeatSentence}` : ""}`)}</p>
       </div>
       <div class="flow-analysis-metrics">
         <div><span>분석 유저</span><strong>${number(behavior.user_count)}명</strong></div>
         <div><span>행동 로그</span><strong>${number(behavior.event_count)}건</strong></div>
-        <div><span>대표 루트</span><strong>${percent(pathRate)}</strong></div>
+        <div><span>최다 순서</span><strong>${percent(pathRate)}</strong></div>
       </div>
     </section>
 
     <section class="journey-map">
       <div class="journey-header">
         <div>
-          <span>대표 여정</span>
-          <strong>${strongestPath ? `${number(strongestPath.user_count)}명 공유 · ${number(strongestPath.occurrence_count)}회 반복` : "대표 여정 없음"}</strong>
+          <span>가장 많이 나온 순서</span>
+          <strong>${strongestPath ? `${number(strongestPath.user_count)}명 · ${number(strongestPath.occurrence_count)}회 관찰` : "반복 관찰된 순서 없음"}</strong>
         </div>
         <em>${strongestPath ? percent(pathRate) : "-"}</em>
       </div>
@@ -732,7 +758,7 @@ function renderBehaviorFlow(data) {
 
     <section class="flow-transition-board">
       <div class="behavior-block-title">
-        <span>갈림과 집중</span>
+        <span>다음 행동 비율</span>
         <strong>상위 ${number(Math.min(transitions.length, 6))}개 전환</strong>
       </div>
       ${transitionFocusRows}
@@ -741,7 +767,7 @@ function renderBehaviorFlow(data) {
     <details class="behavior-detail">
       <summary>
         <span>근거 데이터 펼치기</span>
-        <strong>공통 ${number(commonPaths.length)} · 튀는 부분 ${number(outliers.length)} · 이벤트 ${number(participation.length)} · 루프 ${number(loopPatterns.length)}</strong>
+        <strong>공통 ${number(commonPaths.length)} · 튀는 부분 ${number(outliers.length)} · 이벤트 ${number(participation.length)} · 짧은 반복 ${number(shortIntervalRepeats.length)}</strong>
       </summary>
       <div class="behavior-columns">
         <div class="behavior-block">
@@ -786,7 +812,14 @@ function renderBehaviorFlow(data) {
       </div>
       <div class="behavior-block">
         <div class="behavior-block-title">
-          <span>반복 루프</span>
+          <span>짧은 시간 반복</span>
+          <strong>상위 ${number(Math.min(shortIntervalRepeats.length, 8))}개</strong>
+        </div>
+        <div class="transition-list compact">${shortRepeatRows || `<p class="empty">짧은 시간 반복 신호가 두드러지지 않습니다.</p>`}</div>
+      </div>
+      <div class="behavior-block">
+        <div class="behavior-block-title">
+          <span>연속 반복</span>
           <strong>상위 ${number(Math.min(loopPatterns.length, 6))}개</strong>
         </div>
         <div class="transition-list compact">${loopRows || `<p class="empty">반복 루프가 두드러지지 않습니다.</p>`}</div>

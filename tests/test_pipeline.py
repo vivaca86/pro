@@ -6,6 +6,7 @@ import duckdb
 import pandas as pd
 
 from game_data_engine import run_pipeline
+from game_data_engine.behavior import build_behavior_flow
 from game_data_engine.benchmark import run_benchmark
 from game_data_engine.config import LanguageConfig
 from game_data_engine.ingest import ingest
@@ -119,6 +120,77 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(snapshot["table_counts"]["mart.run_summaries"], 1)
             self.assertEqual(snapshot["summary_by_date"]["date_count"], 1)
             self.assertEqual(snapshot["source_files"][0]["row_count"], 45)
+
+    def test_behavior_flow_detects_short_interval_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "short_repeat.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "uid,event_time,event_name,content_id,product_id,amount,duration_sec,wait_time_sec,result",
+                        "u1,2026-05-28 00:00:00,reward_ping,,,0,0,0,success",
+                        "u1,2026-05-28 00:00:10,reward_ping,,,0,0,0,success",
+                        "u1,2026-05-28 00:00:20,reward_ping,,,0,0,0,success",
+                        "u1,2026-05-28 00:05:00,normal_move,,,0,0,0,success",
+                        "u2,2026-05-28 00:00:00,login,,,0,0,0,success",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            payload = run_pipeline(
+                inputs=[path],
+                dictionary_path=Path("examples/log_language.json"),
+                sample_limit=2,
+            )
+            behavior = payload["behavior_flow"]
+            repeat = behavior["short_interval_repeats"][0]
+
+            self.assertEqual(repeat["code"], "reward_ping")
+            self.assertEqual(repeat["user_count"], 1)
+            self.assertEqual(repeat["max_events_in_window"], 3)
+            self.assertEqual(repeat["window_seconds"], 60)
+            self.assertIn("short_interval_repeat", {item["type"] for item in behavior["outliers"]})
+
+    def test_pandas_behavior_flow_detects_short_interval_repeats(self) -> None:
+        events = pd.DataFrame(
+            [
+                {
+                    "uid": "u1",
+                    "ts": "2026-05-28 00:00:00",
+                    "event_raw": "reward_ping",
+                    "event_label": "reward_ping",
+                    "event_type": "event",
+                    "group": "",
+                    "session_id": "u1-0",
+                },
+                {
+                    "uid": "u1",
+                    "ts": "2026-05-28 00:00:10",
+                    "event_raw": "reward_ping",
+                    "event_label": "reward_ping",
+                    "event_type": "event",
+                    "group": "",
+                    "session_id": "u1-0",
+                },
+                {
+                    "uid": "u1",
+                    "ts": "2026-05-28 00:00:20",
+                    "event_raw": "reward_ping",
+                    "event_label": "reward_ping",
+                    "event_type": "event",
+                    "group": "",
+                    "session_id": "u1-0",
+                },
+            ]
+        )
+
+        behavior = build_behavior_flow(events)
+        repeat = behavior["short_interval_repeats"][0]
+
+        self.assertEqual(repeat["code"], "reward_ping")
+        self.assertEqual(repeat["max_events_in_window"], 3)
+        self.assertEqual(repeat["shortest_window_seconds"], 20)
 
     def test_benchmark_generates_synthetic_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
